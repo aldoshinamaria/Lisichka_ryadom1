@@ -172,7 +172,7 @@ function FoxLottieAvatar(props) {
   return (
     <div className="fox-lottie-clip">
       <div className="fox-lottie-inner">
-        <Lottie className={className ?? 'fox-lottie-canvas'} {...lottieProps} />
+        <Lottie className={className ?? 'fox-lottie-canvas'} {...lottieProps} renderer="svg" />
       </div>
     </div>
   );
