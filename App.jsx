@@ -9,6 +9,7 @@ import {
 import './app.css';
 import foxChatPhoto from './лисичка аватар для чата.png';
 import meditatingFoxAnimation from './src/assets/Meditating Fox.json';
+import { notifyStaffStudentMessage } from './notifyEmail.js';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -39,6 +40,157 @@ function writeStoredAvatar(studentKey, dataUrl) {
   } catch {
     /* квота или приватный режим */
   }
+}
+
+const STORAGE_CASES = 'lisichka_cases_v1';
+const STORAGE_REGISTRY = 'lisichka_students_v1';
+const STORAGE_SESSION = 'lisichka_session_v1';
+
+function loadCases() {
+  if (typeof localStorage === 'undefined') return seedOtherCases();
+  try {
+    const raw = localStorage.getItem(STORAGE_CASES);
+    if (!raw) return seedOtherCases();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return seedOtherCases();
+    return parsed;
+  } catch {
+    return seedOtherCases();
+  }
+}
+
+function loadRegistry() {
+  if (typeof localStorage === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_REGISTRY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function upsertRegistryRecord(record) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const prev = loadRegistry();
+    const next = prev.filter((r) => r.studentKey !== record.studentKey);
+    next.push(record);
+    localStorage.setItem(STORAGE_REGISTRY, JSON.stringify(next));
+  } catch {
+    /* квота */
+  }
+}
+
+function normName(s) {
+  return String(s || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+/** Имя + код должны совпасть с записью при регистрации */
+function findStudentByLogin(registry, nameRaw, codeRaw) {
+  const code = codeRaw.trim();
+  const name = normName(nameRaw);
+  if (!code || !name) return null;
+  for (const r of registry) {
+    if (r.pin !== code) continue;
+    const full = normName(`${r.first} ${r.last}`);
+    const firstOnly = normName(r.first);
+    if (full === name || firstOnly === name) return r;
+    if (full.startsWith(name) && (full.length === name.length || full[name.length] === ' ')) return r;
+  }
+  return null;
+}
+
+function loadSession() {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(STORAGE_SESSION);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function saveSession(payload) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(STORAGE_SESSION, JSON.stringify(payload));
+  } catch {
+    /* квота */
+  }
+}
+
+function clearSession() {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(STORAGE_SESSION);
+  } catch {
+    /* ignore */
+  }
+}
+
+function buildInitialState() {
+  const cases = loadCases();
+  const registry = loadRegistry();
+  const session = loadSession();
+
+  const defaults = {
+    cases,
+    user: null,
+    route: 'welcome',
+    role: 'student',
+    studentTab: 'chat',
+    adminTab: 'queue',
+    historyCaseId: null,
+    adminCaseId: null,
+    activeCaseId: null,
+  };
+
+  if (session?.kind === 'student' && session.studentKey) {
+    const reg = registry.find((r) => r.studentKey === session.studentKey);
+    if (reg) {
+      const mine = cases.filter((c) => c.student === reg.studentKey).sort((a, b) => b.updatedAt - a.updatedAt);
+      let activeCaseId = session.activeCaseId ?? null;
+      if (activeCaseId && !mine.some((c) => c.id === activeCaseId)) {
+        activeCaseId = mine[0]?.id ?? null;
+      }
+      return {
+        ...defaults,
+        user: {
+          first: reg.first,
+          last: reg.last,
+          class: reg.class,
+          code: reg.pin,
+          studentKey: reg.studentKey,
+          avatarDataUrl: readStoredAvatar(reg.studentKey),
+        },
+        route: 'main',
+        role: 'student',
+        studentTab: session.studentTab ?? 'chat',
+        historyCaseId: session.historyCaseId ?? null,
+        activeCaseId,
+      };
+    }
+  }
+
+  if (session?.kind === 'admin') {
+    let adminCaseId = session.adminCaseId ?? null;
+    if (adminCaseId && !cases.some((c) => c.id === adminCaseId)) adminCaseId = null;
+    return {
+      ...defaults,
+      route: 'main',
+      role: 'admin',
+      adminTab: session.adminTab ?? 'queue',
+      adminCaseId,
+    };
+  }
+
+  return defaults;
 }
 
 const initialFox = () => ({
@@ -322,21 +474,24 @@ function statusBadgeAdmin(status) {
 }
 
 export default function App() {
-  const [route, setRoute] = useState('welcome');
-  const [role, setRole] = useState('student');
-  const [studentTab, setStudentTab] = useState('chat');
-  const [adminTab, setAdminTab] = useState('queue');
-  const [historyCaseId, setHistoryCaseId] = useState(null);
-  const [adminCaseId, setAdminCaseId] = useState(null);
+  const init = buildInitialState();
 
-  const [user, setUser] = useState(null);
+  const [route, setRoute] = useState(init.route);
+  const [role, setRole] = useState(init.role);
+  const [studentTab, setStudentTab] = useState(init.studentTab);
+  const [adminTab, setAdminTab] = useState(init.adminTab);
+  const [historyCaseId, setHistoryCaseId] = useState(init.historyCaseId);
+  const [adminCaseId, setAdminCaseId] = useState(init.adminCaseId);
+
+  const [user, setUser] = useState(init.user);
   const [reg, setReg] = useState({ first: '', last: '', class: '', pin: '', agreePd: false });
   const [login, setLogin] = useState({ name: '', code: '' });
+  const [loginError, setLoginError] = useState('');
   const [adminStaff, setAdminStaff] = useState({ login: '', password: '' });
   const [adminStaffError, setAdminStaffError] = useState('');
 
-  const [cases, setCases] = useState(() => seedOtherCases());
-  const [activeCaseId, setActiveCaseId] = useState(null);
+  const [cases, setCases] = useState(init.cases);
+  const [activeCaseId, setActiveCaseId] = useState(init.activeCaseId);
 
   const [chatInput, setChatInput] = useState('');
   const [chatStatus, setChatStatus] = useState('idle');
@@ -372,6 +527,34 @@ export default function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_CASES, JSON.stringify(cases));
+    } catch {
+      /* квота */
+    }
+  }, [cases]);
+
+  useEffect(() => {
+    if (route === 'main' && role === 'student' && user?.studentKey) {
+      saveSession({
+        kind: 'student',
+        studentKey: user.studentKey,
+        activeCaseId,
+        studentTab,
+        historyCaseId,
+      });
+    } else if (route === 'main' && role === 'admin') {
+      saveSession({
+        kind: 'admin',
+        adminTab,
+        adminCaseId,
+      });
+    } else {
+      clearSession();
+    }
+  }, [route, role, user, activeCaseId, studentTab, historyCaseId, adminTab, adminCaseId]);
 
   const clearSilenceNudgeTimer = useCallback(() => {
     if (silenceNudgeTimerRef.current) {
@@ -482,6 +665,13 @@ export default function App() {
         },
       ],
     };
+    upsertRegistryRecord({
+      studentKey,
+      pin: reg.pin.trim(),
+      first,
+      last,
+      class: cls,
+    });
     setCases((prev) => {
       const seeds = prev.filter((c) => c.id.startsWith('c-seed'));
       return [nc, past, ...seeds];
@@ -504,37 +694,45 @@ export default function App() {
   }, [reg]);
 
   const loginAndEnter = useCallback(() => {
-    const name = login.name.trim() || 'Ученик';
-    const parts = name.split(/\s+/);
-    const first = parts[0] || 'Ученик';
-    const last = parts.slice(1).join(' ') || '5«Б»';
-    const studentKey = `${first} ${last}`;
-    const id = uid();
-    const nc = {
-      id,
-      student: studentKey,
-      status: 'open',
-      urgent: false,
-      updatedAt: Date.now(),
-      messages: [initialFox()],
-    };
-    setCases((prev) => [nc, ...prev]);
+    const registry = loadRegistry();
+    const found = findStudentByLogin(registry, login.name, login.code);
+    if (!found) {
+      setLoginError('Не нашла такую пару «имя + код». Проверь написание или зайди через «Начать разговор».');
+      return;
+    }
+    setLoginError('');
+    const studentKey = found.studentKey;
     setUser({
-      first,
-      last,
-      class: '',
-      code: login.code.trim() || '—',
+      first: found.first,
+      last: found.last,
+      class: found.class,
+      code: found.pin,
       studentKey,
       avatarDataUrl: readStoredAvatar(studentKey),
     });
-    setActiveCaseId(id);
+    const mine = cases.filter((c) => c.student === studentKey).sort((a, b) => b.updatedAt - a.updatedAt);
+    let nextActiveId = mine[0]?.id ?? null;
+    if (!mine.length) {
+      const id = uid();
+      const nc = {
+        id,
+        student: studentKey,
+        status: 'open',
+        urgent: false,
+        updatedAt: Date.now(),
+        messages: [initialFox()],
+      };
+      setCases((prev) => [nc, ...prev]);
+      nextActiveId = id;
+    }
+    setActiveCaseId(nextActiveId);
     setRoute('main');
     setRole('student');
     setStudentTab('chat');
     setHistoryCaseId(null);
     setAdminCaseId(null);
     setChatStatus('idle');
-  }, [login]);
+  }, [login, cases]);
 
   const appendMessage = useCallback((caseId, msg) => {
     setCases((prev) =>
@@ -589,6 +787,11 @@ export default function App() {
 
     setChatInput('');
     appendMessage(activeCaseId, { id: uid(), from: 'user', at: Date.now(), text: t });
+    notifyStaffStudentMessage({
+      studentKey: user?.studentKey,
+      text: t,
+      caseId: activeCaseId,
+    });
     setChatStatus('waiting');
     updateCase(activeCaseId, { status: 'in_progress' });
 
@@ -721,16 +924,30 @@ export default function App() {
           ← к Лисичке
         </button>
         <h2 className="h2">С возвращением 💬</h2>
-        <p className="muted">То, что ты придумал при регистрации — имя и код</p>
+        <p className="muted">То же имя и фамилия, что при регистрации, и твой код</p>
         <div className="card">
           <Field
             label="Как тебя зовут?"
             id="ln"
             value={login.name}
-            onChange={(e) => setLogin({ ...login, name: e.target.value })}
-            placeholder="Имя или имя и фамилия"
+            onChange={(e) => {
+              setLoginError('');
+              setLogin({ ...login, name: e.target.value });
+            }}
+            placeholder="Имя и фамилия, как при регистрации"
           />
-          <Field label="Твой код" id="lc" type="password" value={login.code} onChange={(e) => setLogin({ ...login, code: e.target.value })} placeholder="Тот самый, что ты придумал" />
+          <Field
+            label="Твой код"
+            id="lc"
+            type="password"
+            value={login.code}
+            onChange={(e) => {
+              setLoginError('');
+              setLogin({ ...login, code: e.target.value });
+            }}
+            placeholder="Тот самый, что ты придумал"
+          />
+          {loginError ? <p className="profile-avatar-error">{loginError}</p> : null}
           <Btn full onClick={loginAndEnter}>
             Зайти в чат
           </Btn>
@@ -1035,7 +1252,7 @@ export default function App() {
             setUser(null);
             setActiveCaseId(null);
             setStudentTab('chat');
-            setCases(seedOtherCases());
+            clearSession();
           }}
         >
           Выйти из аккаунта
@@ -1179,6 +1396,7 @@ export default function App() {
             setAdminTab('queue');
             setAdminCaseId(null);
             setAdminReply('');
+            clearSession();
           }}
         >
           Выйти из режима сотрудника
