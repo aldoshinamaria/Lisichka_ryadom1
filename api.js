@@ -4,6 +4,7 @@ export async function checkMessage(message) {
   if (!url || !key) {
     return { ok: false, danger: false, message: '' };
   }
+  console.log("api sends:", message);
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -11,14 +12,29 @@ export async function checkMessage(message) {
       apikey: key,
       Authorization: `Bearer ${key}`,
     },
-    body: JSON.stringify({ message: String(message), student_id: 1 }),
+    body: JSON.stringify({
+      message: message,
+      student_id: 1
+    }),
   });
   if (!res.ok) {
-    return { ok: false, danger: false, message: (await res.text()) || 'Ошибка запроса' };
+    const t = await res.text();
+    let data;
+    try {
+      data = t ? JSON.parse(t) : t;
+    } catch {
+      data = t;
+    }
+    console.log("api response:", data);
+    return { ok: false, danger: false, message: t || 'Ошибка запроса' };
   }
   try {
-    return await res.json();
+    const data = await res.json();
+    console.log("api response:", data);
+    return data;
   } catch {
+    const data = null;
+    console.log("api response:", data);
     return { ok: false, danger: false, message: '' };
   }
 }

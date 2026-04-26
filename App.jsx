@@ -868,6 +868,7 @@ export default function App() {
     const messageText = chatInput.trim();
     if (!messageText || !activeCaseId) return;
 
+    console.log("sending message:", messageText);
     let result;
     try {
       result = await checkMessage(messageText);
