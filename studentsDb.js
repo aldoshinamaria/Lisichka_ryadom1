@@ -2,26 +2,30 @@ import { supabase } from './supabaseClient.js';
 
 /**
  * Создаёт строку в public.students и возвращает id.
- * @param {{ surname: string, name: string, className: string, login: string }} p
+ * @param {{ surname: string, name: string, className: string, login: string, password: string }} p
  * @returns {Promise<string | null>}
  */
 export async function insertStudentAndGetId(p) {
   if (!supabase) return null;
-  const { data, error } = await supabase
+  const { surname, name, className, login, password } = p;
+  const { data: student, error } = await supabase
     .from('students')
-    .insert({
-      surname: p.surname,
-      name: p.name,
-      class_name: p.className,
-      login: p.login,
-    })
-    .select('id')
-    .maybeSingle();
+    .insert([{ surname, name, class_name: className, login, password_hash: password }])
+    .select()
+    .single();
   if (error) {
     console.error('students insert failed', error);
     return null;
   }
-  return data?.id != null ? String(data.id) : null;
+  if (student?.id) {
+    try {
+      localStorage.setItem('student_id', String(student.id));
+    } catch {
+      /* квота / приватный режим */
+    }
+    console.log('student created:', student);
+  }
+  return student?.id != null ? String(student.id) : null;
 }
 
 /**

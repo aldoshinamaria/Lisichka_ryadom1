@@ -1,9 +1,15 @@
 /**
  * @param {string} message
- * @param {{ student_id?: string, event_type?: "child_pressed_help" }} [options]
+ * @param {{ event_type?: "child_pressed_help" }} [options]
  */
 export async function checkMessage(message, options = {}) {
-  const { student_id, event_type } = options;
+  const { event_type } = options;
+  let studentId =
+    typeof localStorage !== "undefined" ? localStorage.getItem("student_id") : null;
+  if (studentId === "1") {
+    studentId = null;
+  }
+  console.log("sending student_id:", studentId);
   console.log("api sends:", message);
   console.log("function url:", import.meta.env.VITE_SUPABASE_FUNCTION_URL);
   console.log("has key:", Boolean(import.meta.env.VITE_SUPABASE_ANON_KEY));
@@ -16,10 +22,10 @@ export async function checkMessage(message, options = {}) {
     return data;
   }
 
-  const payload = { message: message != null ? String(message) : "" };
-  if (student_id != null && student_id !== "") {
-    payload.student_id = student_id;
-  }
+  const payload = {
+    message: message != null ? String(message) : "",
+    student_id: studentId,
+  };
   if (event_type) {
     payload.event_type = event_type;
   }

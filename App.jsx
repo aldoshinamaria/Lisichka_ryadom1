@@ -851,10 +851,8 @@ export default function App() {
       name,
       className,
       login: loginStr,
+      password: pass,
     });
-    if (dbId) {
-      setLocalStudentId(dbId);
-    }
     upsertRegistryRecord({
       studentKey,
       name,
@@ -1012,9 +1010,7 @@ export default function App() {
     if (!messageText || !activeCaseId) return;
 
     console.log("sending message:", messageText);
-    const studentId =
-      typeof localStorage !== 'undefined' ? localStorage.getItem('student_id') : null;
-    const result = await checkMessage(messageText, { student_id: studentId });
+    const result = await checkMessage(messageText);
     console.log("checkMessage result:", result);
     if (result?.danger === true) {
       alert("Лисичка рядом. Я могу позвать взрослого");
@@ -1077,12 +1073,7 @@ export default function App() {
 
   const requestAdult = () => {
     if (!activeCaseId) return;
-    const studentId =
-      typeof localStorage !== 'undefined' ? localStorage.getItem('student_id') : null;
-    void checkMessage("", {
-      student_id: studentId,
-      event_type: "child_pressed_help",
-    });
+    void checkMessage("", { event_type: "child_pressed_help" });
     void insertAlert({
       alert_type: 'child_pressed_help',
       status: 'new',
