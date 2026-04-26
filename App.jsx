@@ -10,7 +10,7 @@ import './app.css';
 import foxChatPhoto from './лисичка аватар для чата.png';
 import meditatingFoxAnimation from './src/assets/Meditating Fox.json';
 import { notifyStaffStudentMessage, notifyStaffDangerAlert } from './notifyEmail.js';
-import { checkMessage } from './api.js';
+import { checkMessage } from "./api";
 import { hashPassword, verifyPassword } from './auth.js';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -864,26 +864,40 @@ export default function App() {
   }, []);
 
   const sendStudent = async () => {
-    const t = chatInput.trim();
-    if (!t || !activeCaseId) return;
-    checkMessageDangerRef.current = false;
+    console.log("SEND CLICKED");
+    const messageText = chatInput.trim();
+    if (!messageText || !activeCaseId) return;
+
+    let result;
+    try {
+      result = await checkMessage(messageText);
+    } catch (err) {
+      console.warn("checkMessage error:", err);
+      result = { danger: false };
+    }
+    console.log("checkMessage result:", result);
+    if (result?.danger === true) {
+      alert("Лисичка рядом. Я могу позвать взрослого");
+    }
+
+    checkMessageDangerRef.current = !!result?.danger;
     foxReplyTimeoutsRef.current.forEach((id) => window.clearTimeout(id));
     foxReplyTimeoutsRef.current = [];
 
     setChatInput('');
-    appendMessage(activeCaseId, { id: uid(), from: 'user', at: Date.now(), text: t });
+    appendMessage(activeCaseId, { id: uid(), from: 'user', at: Date.now(), text: messageText });
     notifyStaffStudentMessage({
       studentKey: user?.studentKey,
-      text: t,
+      text: messageText,
       caseId: activeCaseId,
     });
     setChatStatus('waiting');
     updateCase(activeCaseId, { status: 'in_progress' });
 
-    const lines = getFoxFollowUpLines(t);
+    const lines = getFoxFollowUpLines(messageText);
     const foxText = lines[0] ?? 'Я рядом. Напиши ещё, если захочешь 💬';
     const caseId = activeCaseId;
-    const userMessage = t;
+    const caseIdForCheck = caseId;
 
     const timeoutId = window.setTimeout(() => {
       if (!checkMessageDangerRef.current) {
@@ -894,30 +908,21 @@ export default function App() {
     }, 1100);
     foxReplyTimeoutsRef.current.push(timeoutId);
 
-    const caseIdForCheck = caseId;
-    try {
-      const result = await checkMessage(userMessage);
-      console.log('checkMessage result:', result);
-      if (result.danger === true) {
-        alert('Лисичка рядом. Я могу позвать взрослого');
-      }
-      if (!result?.danger) return;
-      checkMessageDangerRef.current = true;
+    if (result?.danger) {
       updateCase(caseIdForCheck, { urgent: true, status: 'new' });
       notifyStaffDangerAlert({
         studentKey: user?.studentKey,
-        text: userMessage,
+        text: messageText,
         caseId: caseIdForCheck,
       });
-      if (activeCaseIdRef.current !== caseIdForCheck) return;
-      appendMessage(caseIdForCheck, {
-        id: uid(),
-        from: 'fox',
-        at: Date.now(),
-        text: 'Лисичка рядом. Я могу позвать взрослого.',
-      });
-    } catch (err) {
-      console.warn('checkMessage error:', err);
+      if (activeCaseIdRef.current === caseIdForCheck) {
+        appendMessage(caseIdForCheck, {
+          id: uid(),
+          from: 'fox',
+          at: Date.now(),
+          text: 'Лисичка рядом. Я могу позвать взрослого.',
+        });
+      }
     }
   };
 
