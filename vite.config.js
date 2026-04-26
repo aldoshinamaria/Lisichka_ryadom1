@@ -8,6 +8,8 @@ const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 // Корень репозитория: index.html только редирект на docs/ (для GitHub Pages с источником «/ root»).
 // Разработка и сборка — из папки app/ (там настоящая точка входа Vite).
 export default defineConfig(({ command }) => ({
+  // .env рядом с package.json: при root: app/ иначе Vite не подхватывал бы переменные
+  envDir: projectRoot,
   root: path.join(projectRoot, 'app'),
   publicDir: path.join(projectRoot, 'public'),
   server: {

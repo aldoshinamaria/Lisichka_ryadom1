@@ -11,7 +11,9 @@ import foxChatPhoto from './лисичка аватар для чата.png';
 import meditatingFoxAnimation from './src/assets/Meditating Fox.json';
 import { notifyStaffStudentMessage, notifyStaffDangerAlert } from './notifyEmail.js';
 import { checkMessage } from "./api";
+import { insertStudentAndGetId, findStudentIdByLogin } from './studentsDb.js';
 import { hashPassword, verifyPassword } from './auth.js';
+import { deleteAlertById, fetchAlerts, insertAlert, patchAlertStatus } from './alerts.js';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -112,6 +114,28 @@ function upsertRegistryRecord(record) {
   }
 }
 
+function setLocalStudentId(id) {
+  if (id == null || typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem('student_id', String(id));
+  } catch {
+    /* квота / приватный режим */
+  }
+}
+
+function setRegistryDbStudentId(studentKey, dbStudentId) {
+  if (typeof localStorage === 'undefined' || !studentKey || dbStudentId == null) return;
+  try {
+    const prev = loadRegistry();
+    const next = prev.map((r) =>
+      r.studentKey === studentKey ? { ...r, dbStudentId } : r
+    );
+    localStorage.setItem(STORAGE_REGISTRY, JSON.stringify(next));
+  } catch {
+    /* квота */
+  }
+}
+
 function updateStudentPasswordHash(studentKey, passwordHash) {
   if (typeof localStorage === 'undefined') return;
   const now = Date.now();
@@ -192,6 +216,9 @@ function buildInitialState() {
   if (session?.kind === 'student' && session.studentKey) {
     const reg = registry.find((r) => r.studentKey === session.studentKey);
     if (reg && reg.passwordHash) {
+      if (reg.dbStudentId) {
+        setLocalStudentId(reg.dbStudentId);
+      }
       const mine = cases.filter((c) => c.student === reg.studentKey).sort((a, b) => b.updatedAt - a.updatedAt);
       let activeCaseId = session.activeCaseId ?? null;
       if (activeCaseId && !mine.some((c) => c.id === activeCaseId)) {
@@ -302,6 +329,26 @@ function IconInbox({ active }) {
     >
       <path d="M4 6h16v12H4V6z" stroke="currentColor" strokeWidth="1.8" />
       <path d="M4 10l8 5 8-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconBell({ active }) {
+  return (
+    <svg
+      className={active ? 'app-icon app-icon--active' : 'app-icon'}
+      width="26"
+      height="26"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden
+    >
+      <path
+        d="M12 22a2 2 0 001.8-1.1h-3.6A2 2 0 0012 22zm7-4v-4a6 6 0 00-3.5-5.4V10a3.5 3.5 0 00-7 0v2.6A6 6 0 005 18v2h14v-2z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
@@ -482,6 +529,11 @@ function statusBadgeAdmin(status) {
   return 'На связи';
 }
 
+function alertSeenBadge(s) {
+  if (s === 'new') return { tone: 'wait', children: 'Новое' };
+  return { tone: 'neutral', children: 'Просмотрено' };
+}
+
 export default function App() {
   const init = buildInitialState();
 
@@ -512,6 +564,8 @@ export default function App() {
   const [adminProfileError, setAdminProfileError] = useState('');
   const [adminStaff, setAdminStaff] = useState({ login: '', password: '' });
   const [adminStaffError, setAdminStaffError] = useState('');
+
+  const [adminAlertsFromDb, setAdminAlertsFromDb] = useState([]);
 
   const [cases, setCases] = useState(init.cases);
   const [activeCaseId, setActiveCaseId] = useState(init.activeCaseId);
@@ -589,6 +643,24 @@ export default function App() {
     const mine = cases.filter((c) => c.student === user.studentKey).sort((a, b) => b.updatedAt - a.updatedAt);
     setActiveCaseId(mine[0]?.id ?? null);
   }, [route, role, user, activeCaseId, cases]);
+
+  /** Подтянуть students.id в localStorage, если в реестре ещё нет dbStudentId (старые аккаунты). */
+  useEffect(() => {
+    if (route !== 'main' || role !== 'student' || !user?.studentKey) return;
+    const reg = loadRegistry().find((r) => r.studentKey === user.studentKey);
+    if (!reg || reg.dbStudentId) return;
+    if (!reg.login) return;
+    let cancelled = false;
+    (async () => {
+      const id = await findStudentIdByLogin(reg.login);
+      if (cancelled || !id) return;
+      setLocalStudentId(id);
+      setRegistryDbStudentId(user.studentKey, id);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [route, role, user?.studentKey]);
 
   const clearSilenceNudgeTimer = useCallback(() => {
     if (silenceNudgeTimerRef.current) {
@@ -680,6 +752,58 @@ export default function App() {
     [adminRegistryTick, route, role, adminTab]
   );
 
+  const newAdminAlertsCount = useMemo(
+    () => adminAlertsFromDb.filter((a) => a.status === 'new').length,
+    [adminAlertsFromDb]
+  );
+
+  const sortedAdminAlerts = useMemo(() => {
+    return [...adminAlertsFromDb].sort((a, b) => {
+      if (a.status === 'new' && b.status !== 'new') return -1;
+      if (a.status !== 'new' && b.status === 'new') return 1;
+      const ta = new Date(a.created_at).getTime();
+      const tb = new Date(b.created_at).getTime();
+      return (tb || 0) - (ta || 0);
+    });
+  }, [adminAlertsFromDb]);
+  /** кнопка «Просмотрено» только для status=new, дальше — seen */
+  const isAlertNew = (s) => s === 'new';
+
+  const refreshAdminAlerts = useCallback(async () => {
+    if (role !== 'admin' || route !== 'main') return;
+    const rows = await fetchAlerts();
+    setAdminAlertsFromDb(rows);
+  }, [role, route]);
+
+  useEffect(() => {
+    if (role !== 'admin' || route !== 'main') return;
+    void refreshAdminAlerts();
+  }, [role, route, adminTab, refreshAdminAlerts]);
+
+  useEffect(() => {
+    if (role !== 'admin' || route !== 'main') return;
+    const t = setInterval(() => {
+      void refreshAdminAlerts();
+    }, 15000);
+    return () => clearInterval(t);
+  }, [role, route, refreshAdminAlerts]);
+
+  const markAdminAlertSeen = useCallback(
+    async (id) => {
+      await patchAlertStatus(id, 'seen');
+      void refreshAdminAlerts();
+    },
+    [refreshAdminAlerts]
+  );
+
+  const deleteAdminAlert = useCallback(
+    async (id) => {
+      await deleteAlertById(id);
+      void refreshAdminAlerts();
+    },
+    [refreshAdminAlerts]
+  );
+
   const registerAndEnter = useCallback(async () => {
     setRegisterError('');
     const name = reg.name.trim();
@@ -722,6 +846,15 @@ export default function App() {
     };
 
     const now = Date.now();
+    const dbId = await insertStudentAndGetId({
+      surname,
+      name,
+      className,
+      login: loginStr,
+    });
+    if (dbId) {
+      setLocalStudentId(dbId);
+    }
     upsertRegistryRecord({
       studentKey,
       name,
@@ -730,6 +863,7 @@ export default function App() {
       login: loginStr,
       passwordHash,
       createdAt: now,
+      ...(dbId ? { dbStudentId: dbId } : {}),
     });
     setAdminRegistryTick((t) => t + 1);
     setCases((prev) => {
@@ -779,6 +913,15 @@ export default function App() {
     }
 
     const studentKey = found.studentKey;
+    if (found.dbStudentId) {
+      setLocalStudentId(found.dbStudentId);
+    } else {
+      const id = await findStudentIdByLogin(found.login);
+      if (id) {
+        setLocalStudentId(id);
+        setRegistryDbStudentId(studentKey, id);
+      }
+    }
     setUser({
       name: found.name,
       surname: found.surname,
@@ -869,7 +1012,9 @@ export default function App() {
     if (!messageText || !activeCaseId) return;
 
     console.log("sending message:", messageText);
-    const result = await checkMessage(messageText);
+    const studentId =
+      typeof localStorage !== 'undefined' ? localStorage.getItem('student_id') : null;
+    const result = await checkMessage(messageText, { student_id: studentId });
     console.log("checkMessage result:", result);
     if (result?.danger === true) {
       alert("Лисичка рядом. Я могу позвать взрослого");
@@ -880,7 +1025,8 @@ export default function App() {
     foxReplyTimeoutsRef.current = [];
 
     setChatInput('');
-    appendMessage(activeCaseId, { id: uid(), from: 'user', at: Date.now(), text: messageText });
+    const userMessageId = uid();
+    appendMessage(activeCaseId, { id: userMessageId, from: 'user', at: Date.now(), text: messageText });
     notifyStaffStudentMessage({
       studentKey: user?.studentKey,
       text: messageText,
@@ -904,6 +1050,10 @@ export default function App() {
     foxReplyTimeoutsRef.current.push(timeoutId);
 
     if (result?.danger) {
+      void insertAlert({
+        alert_type: 'ai_detected',
+        status: 'new',
+      });
       updateCase(caseIdForCheck, { urgent: true, status: 'new' });
       notifyStaffDangerAlert({
         studentKey: user?.studentKey,
@@ -927,6 +1077,16 @@ export default function App() {
 
   const requestAdult = () => {
     if (!activeCaseId) return;
+    const studentId =
+      typeof localStorage !== 'undefined' ? localStorage.getItem('student_id') : null;
+    void checkMessage("", {
+      student_id: studentId,
+      event_type: "child_pressed_help",
+    });
+    void insertAlert({
+      alert_type: 'child_pressed_help',
+      status: 'new',
+    });
     updateCase(activeCaseId, { urgent: true, status: 'new' });
     appendMessage(activeCaseId, {
       id: uid(),
@@ -1580,6 +1740,88 @@ export default function App() {
     );
   }
 
+  if (route === 'main' && role === 'admin' && adminTab === 'notifications') {
+    return (
+      <Page narrow={false}>
+        <div className="admin-wrap">
+          <h2 className="h2 h2--mb-sm">Уведомления</h2>
+          <p className="muted muted--tight muted--flush">Срочные сигналы и запросы помощи</p>
+          <div className="list-stack list-stack--mt">
+            {sortedAdminAlerts.length === 0 ? (
+              <p className="muted">Пока нет уведомлений</p>
+            ) : (
+              sortedAdminAlerts.map((a) => {
+                const b = alertSeenBadge(a.status);
+                return (
+                <div key={a.id} className="card admin-alert-card">
+                  <div className="admin-alert-card__row">
+                    <div className="admin-alert-card__meta">
+                      <label className="form-label">alert_type</label>
+                      <p className="muted admin-registry-line">{a.alert_type != null ? String(a.alert_type) : '—'}</p>
+                      <label className="form-label">status</label>
+                      <p className="muted admin-registry-line">{a.status != null ? String(a.status) : '—'}</p>
+                      <label className="form-label">created_at</label>
+                      <p className="muted admin-registry-line">
+                        {a.created_at != null && a.created_at !== '' ? formatTime(a.created_at) : '—'}
+                      </p>
+                    </div>
+                    <Badge tone={b.tone}>{b.children}</Badge>
+                  </div>
+                  <div className="admin-alert-card__btns">
+                    <Btn
+                      full
+                      variant="secondary"
+                      disabled={!isAlertNew(a.status)}
+                      onClick={() => { void markAdminAlertSeen(a.id); }}
+                    >
+                      Просмотрено
+                    </Btn>
+                    <GhostBtn onClick={() => { void deleteAdminAlert(a.id); }}>Удалить</GhostBtn>
+                  </div>
+                </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+        <BottomNav
+          items={[
+            {
+              key: 'q',
+              label: 'Чаты',
+              icon: <IconInbox active={false} />,
+              active: false,
+              onClick: () => setAdminTab('queue'),
+            },
+            {
+              key: 'n',
+              label: (
+                <span className="bottom-nav__label-with-badge">
+                  Уведомления
+                  {newAdminAlertsCount > 0 ? (
+                    <span className="bottom-nav__count-pill" aria-label={`Новых: ${newAdminAlertsCount}`}>
+                      {newAdminAlertsCount > 9 ? '9+' : newAdminAlertsCount}
+                    </span>
+                  ) : null}
+                </span>
+              ),
+              icon: <IconBell active />,
+              active: true,
+              onClick: () => {},
+            },
+            {
+              key: 'p',
+              label: 'О себе',
+              icon: <IconUser active={false} />,
+              active: false,
+              onClick: () => setAdminTab('profile'),
+            },
+          ]}
+        />
+      </Page>
+    );
+  }
+
   if (route === 'main' && role === 'admin' && adminTab === 'queue') {
     return (
       <Page narrow={false}>
@@ -1628,6 +1870,22 @@ export default function App() {
         <BottomNav
           items={[
             { key: 'q', label: 'Чаты', icon: <IconInbox active />, active: true, onClick: () => {} },
+            {
+              key: 'n',
+              label: (
+                <span className="bottom-nav__label-with-badge">
+                  Уведомления
+                  {newAdminAlertsCount > 0 ? (
+                    <span className="bottom-nav__count-pill" aria-label={`Новых: ${newAdminAlertsCount}`}>
+                      {newAdminAlertsCount > 9 ? '9+' : newAdminAlertsCount}
+                    </span>
+                  ) : null}
+                </span>
+              ),
+              icon: <IconBell active={false} />,
+              active: false,
+              onClick: () => setAdminTab('notifications'),
+            },
             {
               key: 'p',
               label: 'О себе',
@@ -1738,6 +1996,22 @@ export default function App() {
               icon: <IconInbox active={false} />,
               active: false,
               onClick: () => setAdminTab('queue'),
+            },
+            {
+              key: 'n',
+              label: (
+                <span className="bottom-nav__label-with-badge">
+                  Уведомления
+                  {newAdminAlertsCount > 0 ? (
+                    <span className="bottom-nav__count-pill" aria-label={`Новых: ${newAdminAlertsCount}`}>
+                      {newAdminAlertsCount > 9 ? '9+' : newAdminAlertsCount}
+                    </span>
+                  ) : null}
+                </span>
+              ),
+              icon: <IconBell active={false} />,
+              active: false,
+              onClick: () => setAdminTab('notifications'),
             },
             { key: 'p', label: 'О себе', icon: <IconUser active />, active: true, onClick: () => {} },
           ]}
