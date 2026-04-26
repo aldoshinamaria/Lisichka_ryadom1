@@ -2,7 +2,7 @@ import { supabase } from './supabaseClient.js';
 
 /**
  * @param {object} row
- * @param {'ai_detected'|'child_pressed_help'} row.alert_type
+ * @param {'ai_detected'|'child_pressed_help'|'bullying'|'family_abuse'|'illegal_pressure'|'self_harm'|'immediate_danger'|'other_risk'|string} row.alert_type
  * @param {string} [row.status]
  */
 export async function insertAlert(row) {

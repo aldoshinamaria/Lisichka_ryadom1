@@ -2,14 +2,13 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Lottie from 'lottie-react';
 import {
   pickFoxOpening,
-  getFoxFollowUpLines,
   FOX_SILENCE_NUDGE_MS,
   pickSilenceNudgeLine,
 } from './foxDialogue.js';
 import './app.css';
 import foxChatPhoto from './лисичка аватар для чата.png';
 import meditatingFoxAnimation from './src/assets/Meditating Fox.json';
-import { notifyStaffStudentMessage, notifyStaffDangerAlert } from './notifyEmail.js';
+import { notifyStaffStudentMessage } from './notifyEmail.js';
 import { checkMessage } from "./api";
 import { insertStudentAndGetId, findStudentIdByLogin } from './studentsDb.js';
 import { hashPassword, verifyPassword } from './auth.js';
@@ -680,7 +679,11 @@ export default function App() {
     }
 
     const last = activeCase.messages[activeCase.messages.length - 1];
-    if (!last || last.from !== 'fox' || last.silenceCheck) {
+    if (
+      !last ||
+      (last.from !== 'fox' && last.from !== 'ai') ||
+      last.silenceCheck
+    ) {
       return undefined;
     }
 
@@ -1016,6 +1019,11 @@ export default function App() {
       alert("Лисичка рядом. Я могу позвать взрослого");
     }
 
+    const replyText =
+      result?.ok && typeof result?.reply === "string" && result.reply.trim()
+        ? result.reply.trim()
+        : "Я рядом. Сейчас не получилось ответить — напиши ещё чуть-чуть позже 💬";
+
     messageDangerFromApiRef.current = !!result?.danger;
     foxReplyTimeoutsRef.current.forEach((id) => window.clearTimeout(id));
     foxReplyTimeoutsRef.current = [];
@@ -1031,39 +1039,18 @@ export default function App() {
     setChatStatus('waiting');
     updateCase(activeCaseId, { status: 'in_progress' });
 
-    const lines = getFoxFollowUpLines(messageText);
-    const foxText = lines[0] ?? 'Я рядом. Напиши ещё, если захочешь 💬';
     const caseId = activeCaseId;
     const caseIdForCheck = caseId;
 
     const timeoutId = window.setTimeout(() => {
-      if (!messageDangerFromApiRef.current) {
-        appendMessage(caseId, { id: uid(), from: 'fox', at: Date.now(), text: foxText });
-      }
+      appendMessage(caseId, { id: uid(), from: 'ai', at: Date.now(), text: replyText });
       setChatStatus('idle');
       updateCase(caseId, { status: messageDangerFromApiRef.current ? 'new' : 'open' });
     }, 1100);
     foxReplyTimeoutsRef.current.push(timeoutId);
 
     if (result?.danger) {
-      void insertAlert({
-        alert_type: 'ai_detected',
-        status: 'new',
-      });
       updateCase(caseIdForCheck, { urgent: true, status: 'new' });
-      notifyStaffDangerAlert({
-        studentKey: user?.studentKey,
-        text: messageText,
-        caseId: caseIdForCheck,
-      });
-      if (activeCaseIdRef.current === caseIdForCheck) {
-        appendMessage(caseIdForCheck, {
-          id: uid(),
-          from: 'fox',
-          at: Date.now(),
-          text: 'Лисичка рядом. Я могу позвать взрослого.',
-        });
-      }
     }
   };
 

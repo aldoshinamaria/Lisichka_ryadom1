@@ -16,26 +16,6 @@ type StudentRow = {
   class_name: string | null;
 };
 
-function uchenikLineForEmail(row: StudentRow | null): string {
-  if (!row) {
-    return "Профиль ученика в базе не найден";
-  }
-  const s = String(row.surname ?? "").trim();
-  const n = String(row.name ?? "").trim();
-  const c = String(row.class_name ?? "").trim();
-  const fio = [s, n].filter(Boolean).join(" ");
-  if (fio && c) {
-    return `Ученик ${fio}, ${c}`;
-  }
-  if (fio) {
-    return `Ученик ${fio}`;
-  }
-  if (c) {
-    return `Ученик, ${c}`;
-  }
-  return "Ученик: в карточке нет фамилии, имени и класса";
-}
-
 function getSupabaseForStudents() {
   const url = Deno.env.get("SUPABASE_URL");
   const key =
@@ -44,29 +24,30 @@ function getSupabaseForStudents() {
   return createClient(url, key);
 }
 
-async function getStudent(
-  studentId: unknown
+/**
+ * `student_id` не приводим к number — id остаётся как в JSON (например uuid string).
+ */
+async function fetchStudentById(
+  student_id: unknown
 ): Promise<StudentRow | null> {
   const supabase = getSupabaseForStudents();
   if (!supabase) {
     return null;
   }
-  if (studentId === null || studentId === undefined || studentId === "") {
+  if (student_id === null || student_id === undefined || student_id === "") {
     return null;
   }
-  const { data, error } = await supabase
+  const { data: student, error } = await supabase
     .from("students")
     .select("surname, name, class_name")
-    .eq("id", studentId)
-    .maybeSingle();
+    .eq("id", student_id)
+    .single();
+  console.log("student:", student);
   if (error) {
     console.error("students lookup error:", error);
     return null;
   }
-  if (!data) {
-    return null;
-  }
-  return data as StudentRow;
+  return (student as StudentRow) ?? null;
 }
 
 function buildAdminStudentUrl(studentId: unknown): string {
@@ -78,6 +59,71 @@ function buildAdminStudentUrl(studentId: unknown): string {
       ? ""
       : String(studentId);
   return `${base}/admin/student/${idPart}`;
+}
+
+const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+
+const FALLBACK_AI_REPLY = "Я рядом. Расскажи чуть подробнее 💛";
+
+async function getAIResponse(userMessage: string): Promise<string> {
+  if (!OPENROUTER_API_KEY) {
+    console.warn("OPENROUTER_API_KEY is not set");
+    return FALLBACK_AI_REPLY;
+  }
+  const trimmed = String(userMessage).trim();
+  if (!trimmed) {
+    return FALLBACK_AI_REPLY;
+  }
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "openrouter/free",
+      messages: [
+        {
+          role: "system",
+          content: `
+Ты — добрый, спокойный, внимательный собеседник для ребёнка.
+
+Твоя задача:
+— поддерживать
+— задавать мягкие вопросы
+— помогать выговориться
+— НЕ пугать
+— НЕ давать сложных советов
+— НЕ заменять взрослого
+
+Если ребёнку плохо:
+— прояви эмпатию
+— спроси, что случилось
+— поддержи
+
+Если есть тревожные сигналы (буллинг, насилие, угрозы):
+— мягко предложи обратиться к взрослому
+— не дави
+
+Говори просто, тепло, по-дружески.
+`,
+        },
+        {
+          role: "user",
+          content: trimmed,
+        },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("OpenRouter error:", res.status, errText);
+    return FALLBACK_AI_REPLY;
+  }
+  const data = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  return data.choices?.[0]?.message?.content || FALLBACK_AI_REPLY;
 }
 
 async function sendWeb3FormsEmail(subject: string, text: string) {
@@ -134,23 +180,28 @@ serve(async (req) => {
     }
 
     const message = body.message || "";
-    const studentId = body.student_id;
+    const student_id = body.student_id;
     const eventType =
       typeof body.event_type === "string" ? body.event_type : undefined;
 
-    console.log("student_id:", studentId);
-    console.log("SERVER BODY:", body);
-    console.log("SERVER MESSAGE:", message);
+    console.log("student_id:", student_id);
+    console.log("SERVER MESSAGE:", String(message));
 
     if (eventType === "child_pressed_help") {
       try {
-        const student = await getStudent(studentId);
-        const line = uchenikLineForEmail(student);
+        const student = await fetchStudentById(student_id);
         const lead = student
-          ? `${line} нажал кнопку "Попросить помощи".`
-          : `Профиль в базе не найден. Ребёнок нажал кнопку "Попросить помощи".`;
-        console.log("student row:", student);
-        const adminStudentUrl = buildAdminStudentUrl(studentId);
+          ? (() => {
+              const studentName = `${student.surname} ${student.name}`.replace(
+                /\s+/g,
+                " "
+              ).trim();
+              return `Ученик ${studentName}, ${String(
+                student.class_name ?? ""
+              ).trim()} нажал кнопку «Попросить помощи».`;
+            })()
+          : "Не удалось определить ученика. Ребёнок нажал кнопку «Попросить помощи».";
+        const adminStudentUrl = buildAdminStudentUrl(student_id);
         const emailBody =
           `Срочное сообщение от Лисички.
 
@@ -165,12 +216,17 @@ ${adminStudentUrl}`;
         console.error("web3forms email error:", e);
       }
       return new Response(
-        JSON.stringify({ ok: true, danger: false, message: "Сообщение безопасно" }),
+        JSON.stringify({ ok: true, danger: false, reply: "" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const lowerMessage = String(message).toLowerCase();
+    const strMessage = String(message).trim();
+    const aiReply = strMessage
+      ? await getAIResponse(strMessage)
+      : FALLBACK_AI_REPLY;
+
+    const lowerMessage = strMessage.toLowerCase();
 
     const dangerWords = [
       "плохо",
@@ -191,19 +247,23 @@ ${adminStudentUrl}`;
 
     if (isDanger) {
       try {
-        const student = await getStudent(studentId);
-        const line = uchenikLineForEmail(student);
-        const textMsg = String(message);
+        const student = await fetchStudentById(student_id);
+        const textMsg = strMessage;
         const lead = student
-          ? `${line} написал:`
-          : `Профиль в базе не найден. Сообщение:`;
-        console.log("student row:", student);
-        const adminStudentUrl = buildAdminStudentUrl(studentId);
+          ? (() => {
+              const studentName = `${student.surname} ${student.name}`.replace(
+                /\s+/g,
+                " "
+              ).trim();
+              return `Ученик ${studentName}, ${String(
+                student.class_name ?? ""
+              ).trim()} написал: ${textMsg}`;
+            })()
+          : `Не удалось определить ученика\n\n"${textMsg}"`;
+        const adminStudentUrl = buildAdminStudentUrl(student_id);
         const emailBody = `Срочное сообщение от Лисички.
 
 ${lead}
-
-"${textMsg}"
 
 ⚠️ Требуется внимание взрослого.
 
@@ -215,9 +275,11 @@ ${adminStudentUrl}`;
       }
     }
 
-    const payload = isDanger
-      ? { ok: true, danger: true, message: "⚠️ Обнаружен тревожный сигнал" }
-      : { ok: true, danger: false, message: "Сообщение безопасно" };
+    const payload = {
+      ok: true,
+      reply: aiReply,
+      danger: isDanger,
+    };
 
     return new Response(JSON.stringify(payload), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
