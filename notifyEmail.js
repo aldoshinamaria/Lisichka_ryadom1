@@ -46,3 +46,37 @@ export function notifyStaffStudentMessage({ studentKey, text, caseId }) {
     /* сеть / блокировщики — не мешаем чату */
   });
 }
+
+/** Отдельное письмо сотруднику при checkMessage.danger (тревожный сигнал) */
+export function notifyStaffDangerAlert({ studentKey, text, caseId }) {
+  const accessKey = import.meta.env.VITE_WEB3FORMS_ACCESS_KEY;
+  if (!accessKey || typeof fetch === 'undefined') return;
+
+  const sk = studentKey?.trim() || '—';
+  const msg = (text ?? '').trim() || '—';
+  const cid = caseId?.trim() || '—';
+
+  const body = {
+    access_key: accessKey,
+    subject: `⚠️ Лисичка: тревожный сигнал — ${sk.slice(0, 50)}`,
+    from_name: 'Лисичка рядом',
+    message: [
+      'Обнаружен тревожный сигнал по тексту ученика (проверка check-message).',
+      '',
+      `Ученик: ${sk}`,
+      `ID чата: ${cid}`,
+      '',
+      'Сообщение ученика:',
+      msg,
+    ].join('\n'),
+  };
+
+  void fetch(WEB3FORMS_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}

@@ -39,23 +39,33 @@ serve(async (req) => {
 
     const raw = typeof body?.message === "string" ? body.message : String(body?.message ?? "");
 
-    // ⚠️ список тревожных слов (можно расширять)
-    const dangerWords = [
+    // ⚠️ тревожные слова (подстрока в тексте, без проверки при вводе — только в Edge Function)
+    const dangerSubstrings = [
+      "грустно",
+      "тревожно",
+      "плачу",
       "боюсь",
+      "страшно",
       "меня бьют",
       "обзывают",
       "не хочу жить",
-      "страшно",
       "помогите",
       "мне плохо",
+      "плохо", // осторожно: не срабатывать на «неплохо» — обработаем отдельно
       "издеваются",
-      "плачу",
       "одиноко",
     ];
 
     const lowerMessage = raw.toLowerCase();
 
-    const isDanger = dangerWords.some((word) => lowerMessage.includes(word));
+    const isDanger =
+      dangerSubstrings.some((w) => {
+        if (w === "плохо") {
+          if (lowerMessage.includes("неплохо")) return false;
+          return lowerMessage.includes("плохо");
+        }
+        return lowerMessage.includes(w);
+      });
 
     return new Response(
       JSON.stringify({

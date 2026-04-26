@@ -9,8 +9,9 @@ import {
 import './app.css';
 import foxChatPhoto from './лисичка аватар для чата.png';
 import meditatingFoxAnimation from './src/assets/Meditating Fox.json';
-import { notifyStaffStudentMessage } from './notifyEmail.js';
+import { notifyStaffStudentMessage, notifyStaffDangerAlert } from './notifyEmail.js';
 import { checkMessage } from './api.js';
+import { hashPassword, verifyPassword } from './auth.js';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -44,19 +45,43 @@ function writeStoredAvatar(studentKey, dataUrl) {
 }
 
 const STORAGE_CASES = 'lisichka_cases_v1';
-const STORAGE_REGISTRY = 'lisichka_students_v1';
+/** Версия 2: surname, name, className, login, passwordHash, createdAt — без pin/first/last */
+const STORAGE_REGISTRY = 'lisichka_students_v2';
 const STORAGE_SESSION = 'lisichka_session_v1';
 
+function normLogin(s) {
+  return String(s || '')
+    .trim()
+    .toLowerCase();
+}
+
+/** Подпись в списке чатов (админ) и заголовок открытого чата */
+function caseStudentLabel(studentKey) {
+  const r = loadRegistry().find((x) => x.studentKey === studentKey);
+  if (r) return `${r.surname} ${r.name} · ${r.className}`;
+  return studentKey;
+}
+
 function loadCases() {
-  if (typeof localStorage === 'undefined') return seedOtherCases();
+  if (typeof localStorage === 'undefined') return [];
   try {
     const raw = localStorage.getItem(STORAGE_CASES);
-    if (!raw) return seedOtherCases();
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return seedOtherCases();
-    return parsed;
+    if (!Array.isArray(parsed) || parsed.length === 0) return [];
+    const cleaned = parsed.filter(
+      (c) => c && typeof c === 'object' && !String(c.id || '').startsWith('c-seed')
+    );
+    if (cleaned.length !== parsed.length) {
+      try {
+        localStorage.setItem(STORAGE_CASES, JSON.stringify(cleaned));
+      } catch {
+        /* квота */
+      }
+    }
+    return cleaned;
   } catch {
-    return seedOtherCases();
+    return [];
   }
 }
 
@@ -66,7 +91,10 @@ function loadRegistry() {
     const raw = localStorage.getItem(STORAGE_REGISTRY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (r) => r && typeof r === 'object' && r.passwordHash && typeof r.login === 'string' && r.studentKey
+    );
   } catch {
     return [];
   }
@@ -84,26 +112,35 @@ function upsertRegistryRecord(record) {
   }
 }
 
-function normName(s) {
-  return String(s || '')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, ' ');
+function updateStudentPasswordHash(studentKey, passwordHash) {
+  if (typeof localStorage === 'undefined') return;
+  const now = Date.now();
+  try {
+    const prev = loadRegistry();
+    const next = prev.map((r) =>
+      r.studentKey === studentKey ? { ...r, passwordHash, adminProfileUpdatedAt: now } : r
+    );
+    localStorage.setItem(STORAGE_REGISTRY, JSON.stringify(next));
+  } catch {
+    /* квота */
+  }
 }
 
-/** Имя + код должны совпасть с записью при регистрации */
-function findStudentByLogin(registry, nameRaw, codeRaw) {
-  const code = codeRaw.trim();
-  const name = normName(nameRaw);
-  if (!code || !name) return null;
-  for (const r of registry) {
-    if (r.pin !== code) continue;
-    const full = normName(`${r.first} ${r.last}`);
-    const firstOnly = normName(r.first);
-    if (full === name || firstOnly === name) return r;
-    if (full.startsWith(name) && (full.length === name.length || full[name.length] === ' ')) return r;
+/** Сохранение фамилии, имени, класса; фиксирует актуальные дата и время */
+function updateStudentProfileFields(studentKey, fields) {
+  if (typeof localStorage === 'undefined') return;
+  const now = Date.now();
+  try {
+    const prev = loadRegistry();
+    const next = prev.map((r) =>
+      r.studentKey === studentKey
+        ? { ...r, ...fields, adminProfileUpdatedAt: now }
+        : r
+    );
+    localStorage.setItem(STORAGE_REGISTRY, JSON.stringify(next));
+  } catch {
+    /* квота */
   }
-  return null;
 }
 
 function loadSession() {
@@ -154,7 +191,7 @@ function buildInitialState() {
 
   if (session?.kind === 'student' && session.studentKey) {
     const reg = registry.find((r) => r.studentKey === session.studentKey);
-    if (reg) {
+    if (reg && reg.passwordHash) {
       const mine = cases.filter((c) => c.student === reg.studentKey).sort((a, b) => b.updatedAt - a.updatedAt);
       let activeCaseId = session.activeCaseId ?? null;
       if (activeCaseId && !mine.some((c) => c.id === activeCaseId)) {
@@ -163,10 +200,10 @@ function buildInitialState() {
       return {
         ...defaults,
         user: {
-          first: reg.first,
-          last: reg.last,
-          class: reg.class,
-          code: reg.pin,
+          name: reg.name,
+          surname: reg.surname,
+          className: reg.className,
+          login: reg.login,
           studentKey: reg.studentKey,
           avatarDataUrl: readStoredAvatar(reg.studentKey),
         },
@@ -200,35 +237,6 @@ const initialFox = () => ({
   at: Date.now(),
   text: pickFoxOpening(),
 });
-
-const seedOtherCases = () => [
-  {
-    id: 'c-seed-1',
-    student: 'Ученик 5«А»',
-    status: 'new',
-    urgent: true,
-    updatedAt: Date.now() - 120000,
-    messages: [
-      { id: '1', from: 'user', at: Date.now() - 130000, text: 'Мне плохо, не могу сосредоточиться на уроке.' },
-    ],
-  },
-  {
-    id: 'c-seed-2',
-    student: 'Ученик 5«В»',
-    status: 'in_progress',
-    urgent: false,
-    updatedAt: Date.now() - 3600000,
-    messages: [
-      { id: '1', from: 'user', at: Date.now() - 3700000, text: 'Хочу поговорить о конфликте в классе.' },
-      {
-        id: '2',
-        from: 'fox',
-        at: Date.now() - 3600000,
-        text: 'Спасибо за сообщение. Можешь добавить ещё пару слов, когда захочешь — я рядом.',
-      },
-    ],
-  },
-];
 
 function IconChat({ active }) {
   return (
@@ -485,9 +493,23 @@ export default function App() {
   const [adminCaseId, setAdminCaseId] = useState(init.adminCaseId);
 
   const [user, setUser] = useState(init.user);
-  const [reg, setReg] = useState({ first: '', last: '', class: '', pin: '', agreePd: false });
-  const [login, setLogin] = useState({ name: '', code: '' });
+  const [reg, setReg] = useState({
+    name: '',
+    surname: '',
+    className: '',
+    login: '',
+    password: '',
+    agreePd: false,
+  });
+  const [registerError, setRegisterError] = useState('');
+  const [login, setLogin] = useState({ login: '', password: '' });
   const [loginError, setLoginError] = useState('');
+  const [adminRegistryTick, setAdminRegistryTick] = useState(0);
+  const [adminResetPw, setAdminResetPw] = useState({}); // studentKey -> вводимый новый пароль
+  const [adminResetError, setAdminResetError] = useState('');
+  /** Черновики фамилии/имени/класса до «Сохранить»; ключ — studentKey */
+  const [adminEditDraft, setAdminEditDraft] = useState({});
+  const [adminProfileError, setAdminProfileError] = useState('');
   const [adminStaff, setAdminStaff] = useState({ login: '', password: '' });
   const [adminStaffError, setAdminStaffError] = useState('');
 
@@ -559,6 +581,14 @@ export default function App() {
       clearSession();
     }
   }, [route, role, user, activeCaseId, studentTab, historyCaseId, adminTab, adminCaseId]);
+
+  useEffect(() => {
+    if (route !== 'main' || role !== 'student' || !user?.studentKey) return;
+    if (!activeCaseId) return;
+    if (cases.some((c) => c.id === activeCaseId)) return;
+    const mine = cases.filter((c) => c.student === user.studentKey).sort((a, b) => b.updatedAt - a.updatedAt);
+    setActiveCaseId(mine[0]?.id ?? null);
+  }, [route, role, user, activeCaseId, cases]);
 
   const clearSilenceNudgeTimer = useCallback(() => {
     if (silenceNudgeTimerRef.current) {
@@ -638,11 +668,49 @@ export default function App() {
     return cases.filter((c) => c.student === user.studentKey || c.id === activeCaseId);
   }, [cases, user, activeCaseId]);
 
-  const registerAndEnter = useCallback(() => {
-    const first = reg.first.trim();
-    const last = reg.last.trim();
-    const cls = reg.class.trim();
-    const studentKey = `${first} ${last} · ${cls}`;
+  /** Только зарегистрированные ученики, без тестовых c-seed */
+  const adminChats = useMemo(() => {
+    const reg = loadRegistry();
+    const keySet = new Set(reg.map((r) => r.studentKey));
+    return cases.filter((c) => keySet.has(c.student) && !String(c.id || '').startsWith('c-seed'));
+  }, [cases, adminRegistryTick]);
+
+  const adminRegistryList = useMemo(
+    () => loadRegistry().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)),
+    [adminRegistryTick, route, role, adminTab]
+  );
+
+  const registerAndEnter = useCallback(async () => {
+    setRegisterError('');
+    const name = reg.name.trim();
+    const surname = reg.surname.trim();
+    const className = reg.className.trim();
+    const loginStr = reg.login.trim();
+    const pass = reg.password;
+
+    if (!name || !surname || !className || !loginStr) {
+      setRegisterError('Заполни все поля');
+      return;
+    }
+    if (pass.trim().length < 4) {
+      setRegisterError('Пароль — не меньше 4 символов');
+      return;
+    }
+
+    const studentKey = normLogin(loginStr);
+    if (loadRegistry().some((r) => r.studentKey === studentKey)) {
+      setRegisterError('Такой логин уже занят. Придумай другой');
+      return;
+    }
+
+    let passwordHash;
+    try {
+      passwordHash = await hashPassword(pass);
+    } catch {
+      setRegisterError('Не удалось защитить пароль. Попробуй другое устройство или обнови браузер');
+      return;
+    }
+
     const id = uid();
     const nc = {
       id,
@@ -652,42 +720,31 @@ export default function App() {
       updatedAt: Date.now(),
       messages: [initialFox()],
     };
-    const past = {
-      id: uid(),
-      student: studentKey,
-      status: 'closed',
-      urgent: false,
-      updatedAt: Date.now() - 86400000 * 2,
-      messages: [
-        initialFox(),
-        { id: uid(), from: 'user', at: Date.now() - 86400000 * 2 + 1000, text: 'Было тревожно перед контрольной.' },
-        {
-          id: uid(),
-          from: 'fox',
-          at: Date.now() - 86400000 * 2 + 2000,
-          text: 'Спасибо, что поделился. Это важно. Я рядом — напиши, если снова накроет.',
-        },
-      ],
-    };
+
+    const now = Date.now();
     upsertRegistryRecord({
       studentKey,
-      pin: reg.pin.trim(),
-      first,
-      last,
-      class: cls,
+      name,
+      surname,
+      className,
+      login: loginStr,
+      passwordHash,
+      createdAt: now,
     });
+    setAdminRegistryTick((t) => t + 1);
     setCases((prev) => {
-      const seeds = prev.filter((c) => c.id.startsWith('c-seed'));
-      return [nc, past, ...seeds];
+      const rest = prev.filter((c) => !String(c.id || '').startsWith('c-seed'));
+      return [nc, ...rest];
     });
     setUser({
-      first,
-      last,
-      class: cls,
-      code: reg.pin.trim(),
+      name,
+      surname,
+      className,
+      login: loginStr,
       studentKey,
       avatarDataUrl: readStoredAvatar(studentKey),
     });
+    setReg((r) => ({ ...r, password: '' }));
     setActiveCaseId(id);
     setRoute('main');
     setRole('student');
@@ -697,29 +754,45 @@ export default function App() {
     setChatStatus('idle');
   }, [reg]);
 
-  const loginAndEnter = useCallback(() => {
-    const registry = loadRegistry();
-    const found = findStudentByLogin(registry, login.name, login.code);
-    if (!found) {
-      setLoginError('Не нашла такую пару «имя + код». Проверь написание или зайди через «Начать разговор».');
+  const loginAndEnter = useCallback(async () => {
+    setLoginError('');
+    const l = normLogin(login.login);
+    const pass = login.password;
+    if (!l || !pass) {
+      setLoginError('Введи логин и пароль');
       return;
     }
-    setLoginError('');
+    const found = loadRegistry().find((r) => r.studentKey === l);
+    if (!found) {
+      setLoginError('Неверный логин или пароль');
+      return;
+    }
+    let ok = false;
+    try {
+      ok = await verifyPassword(pass, found.passwordHash);
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      setLoginError('Неверный логин или пароль');
+      return;
+    }
+
     const studentKey = found.studentKey;
     setUser({
-      first: found.first,
-      last: found.last,
-      class: found.class,
-      code: found.pin,
+      name: found.name,
+      surname: found.surname,
+      className: found.className,
+      login: found.login,
       studentKey,
       avatarDataUrl: readStoredAvatar(studentKey),
     });
     const mine = cases.filter((c) => c.student === studentKey).sort((a, b) => b.updatedAt - a.updatedAt);
     let nextActiveId = mine[0]?.id ?? null;
     if (!mine.length) {
-      const id = uid();
+      const newId = uid();
       const nc = {
-        id,
+        id: newId,
         student: studentKey,
         status: 'open',
         urgent: false,
@@ -727,7 +800,7 @@ export default function App() {
         messages: [initialFox()],
       };
       setCases((prev) => [nc, ...prev]);
-      nextActiveId = id;
+      nextActiveId = newId;
     }
     setActiveCaseId(nextActiveId);
     setRoute('main');
@@ -746,6 +819,13 @@ export default function App() {
 
   const updateCase = useCallback((caseId, patch) => {
     setCases((prev) => prev.map((c) => (c.id === caseId ? { ...c, ...patch, updatedAt: Date.now() } : c)));
+  }, []);
+
+  const deleteCaseById = useCallback((caseId) => {
+    if (!window.confirm('Удалить этот чат? Действие нельзя отменить.')) return;
+    setCases((prev) => prev.filter((c) => c.id !== caseId));
+    setAdminCaseId((prev) => (prev === caseId ? null : prev));
+    setHistoryCaseId((prev) => (prev === caseId ? null : prev));
   }, []);
 
   const handleStudentAvatarFile = useCallback((e) => {
@@ -783,7 +863,7 @@ export default function App() {
     });
   }, []);
 
-  const sendStudent = () => {
+  const sendStudent = async () => {
     const t = chatInput.trim();
     if (!t || !activeCaseId) return;
     checkMessageDangerRef.current = false;
@@ -806,26 +886,39 @@ export default function App() {
     const userMessage = t;
 
     const timeoutId = window.setTimeout(() => {
-      appendMessage(caseId, { id: uid(), from: 'fox', at: Date.now(), text: foxText });
+      if (!checkMessageDangerRef.current) {
+        appendMessage(caseId, { id: uid(), from: 'fox', at: Date.now(), text: foxText });
+      }
       setChatStatus('idle');
       updateCase(caseId, { status: checkMessageDangerRef.current ? 'new' : 'open' });
     }, 1100);
     foxReplyTimeoutsRef.current.push(timeoutId);
 
     const caseIdForCheck = caseId;
-    void (async () => {
-      try {
-        const result = await checkMessage(userMessage);
-        if (result?.danger) {
-          checkMessageDangerRef.current = true;
-          updateCase(caseIdForCheck, { urgent: true, status: 'new' });
-          setAdultFromDanger(true);
-          setAdultOpen(true);
-        }
-      } catch {
-        /* сеть / функция недоступна */
+    try {
+      const result = await checkMessage(userMessage);
+      console.log('checkMessage result:', result);
+      if (result.danger === true) {
+        alert('Лисичка рядом. Я могу позвать взрослого');
       }
-    })();
+      if (!result?.danger) return;
+      checkMessageDangerRef.current = true;
+      updateCase(caseIdForCheck, { urgent: true, status: 'new' });
+      notifyStaffDangerAlert({
+        studentKey: user?.studentKey,
+        text: userMessage,
+        caseId: caseIdForCheck,
+      });
+      if (activeCaseIdRef.current !== caseIdForCheck) return;
+      appendMessage(caseIdForCheck, {
+        id: uid(),
+        from: 'fox',
+        at: Date.now(),
+        text: 'Лисичка рядом. Я могу позвать взрослого.',
+      });
+    } catch (err) {
+      console.warn('checkMessage error:', err);
+    }
   };
 
   const quickSay = (text) => {
@@ -874,7 +967,69 @@ export default function App() {
     }
   };
 
-  const regOk = reg.first.trim() && reg.last.trim() && reg.class.trim() && reg.pin.trim().length >= 4 && reg.agreePd;
+  const applyAdminPasswordReset = useCallback(
+    async (studentKey) => {
+      setAdminResetError('');
+      const raw = (adminResetPw[studentKey] || '').trim();
+      if (raw.length < 4) {
+        setAdminResetError('Пароль — не меньше 4 символов');
+        return;
+      }
+      try {
+        const ph = await hashPassword(raw);
+        updateStudentPasswordHash(studentKey, ph);
+        setAdminResetPw((p) => ({ ...p, [studentKey]: '' }));
+        setAdminRegistryTick((t) => t + 1);
+      } catch {
+        setAdminResetError('Не удалось установить новый пароль');
+      }
+    },
+    [adminResetPw]
+  );
+
+  const applyAdminProfileSave = useCallback(
+    (studentKey) => {
+      setAdminProfileError('');
+      const st = loadRegistry().find((x) => x.studentKey === studentKey);
+      if (!st) {
+        setAdminProfileError('Запись не найдена');
+        return;
+      }
+      const d = adminEditDraft[studentKey];
+      const base = d || { surname: st.surname, name: st.name, className: st.className };
+      const surname = String(base.surname || '').trim();
+      const name = String(base.name || '').trim();
+      const className = String(base.className || '').trim();
+      if (!surname || !name || !className) {
+        setAdminProfileError('Заполни фамилию, имя и класс');
+        return;
+      }
+      updateStudentProfileFields(studentKey, { surname, name, className });
+      setAdminEditDraft((p) => {
+        const n = { ...p };
+        delete n[studentKey];
+        return n;
+      });
+      setAdminRegistryTick((t) => t + 1);
+    },
+    [adminEditDraft]
+  );
+
+  const patchAdminDraft = useCallback((studentKey, st, field, value) => {
+    setAdminProfileError('');
+    setAdminEditDraft((p) => {
+      const cur = p[studentKey] || { surname: st.surname, name: st.name, className: st.className };
+      return { ...p, [studentKey]: { ...cur, [field]: value } };
+    });
+  }, []);
+
+  const regOk =
+    reg.name.trim() &&
+    reg.surname.trim() &&
+    reg.className.trim() &&
+    reg.login.trim().length >= 2 &&
+    reg.password.trim().length >= 4 &&
+    reg.agreePd;
 
   if (route === 'welcome') {
     return (
@@ -890,13 +1045,18 @@ export default function App() {
             Необязательно сразу объяснять всё.
             <br />
             <br />
-            Можно написать коротко: «мне грустно», «мне страшно», «мне нужна помощь». Я рядом.
+            <span className="welcome__examples">
+              Можно написать коротко: <span className="welcome__q">«мне грустно»</span>,{' '}
+              <span className="welcome__q">«мне страшно»</span>, <span className="welcome__q">«мне нужна помощь»</span>.
+            </span>
+            <br />
+            <span className="welcome__closing">Я рядом.</span>
           </p>
           <div className="welcome__actions">
             <Btn full onClick={() => setRoute('register')}>
               Начать разговор
             </Btn>
-            <GhostBtn onClick={() => setRoute('login')}>У меня уже есть мой код</GhostBtn>
+            <GhostBtn onClick={() => setRoute('login')}>У меня уже есть логин</GhostBtn>
           </div>
           <p className="welcome__staff-wrap">
             <button type="button" className="welcome__staff-link" onClick={() => setRoute('admin-login')}>
@@ -917,16 +1077,58 @@ export default function App() {
         <h2 className="h2">Как тебя зовут?</h2>
         <p className="muted">Заполни поля — и мы уже вместе в чате</p>
         <div className="card">
-          <Field label="Имя" id="f1" value={reg.first} onChange={(e) => setReg({ ...reg, first: e.target.value })} placeholder="Введи имя" />
-          <Field label="Фамилия" id="f2" value={reg.last} onChange={(e) => setReg({ ...reg, last: e.target.value })} placeholder="Введи фамилию" />
-          <Field label="Класс" id="f3" value={reg.class} onChange={(e) => setReg({ ...reg, class: e.target.value })} placeholder="Например, 5«А»" />
           <Field
-            label="Придумай код для входа"
+            label="Фамилия"
+            id="f0"
+            value={reg.surname}
+            onChange={(e) => {
+              setRegisterError('');
+              setReg({ ...reg, surname: e.target.value });
+            }}
+            placeholder="Введи фамилию"
+          />
+          <Field
+            label="Имя"
+            id="f1"
+            value={reg.name}
+            onChange={(e) => {
+              setRegisterError('');
+              setReg({ ...reg, name: e.target.value });
+            }}
+            placeholder="Введи имя"
+          />
+          <Field
+            label="Класс"
+            id="f3"
+            value={reg.className}
+            onChange={(e) => {
+              setRegisterError('');
+              setReg({ ...reg, className: e.target.value });
+            }}
+            placeholder="Например, 5«А»"
+          />
+          <Field
+            label="Логин"
+            id="f-log"
+            value={reg.login}
+            onChange={(e) => {
+              setRegisterError('');
+              setReg({ ...reg, login: e.target.value });
+            }}
+            placeholder="Как к тебе обращаться в системе: латиницу или цифры"
+            autoComplete="username"
+          />
+          <Field
+            label="Пароль"
             id="f4"
             type="password"
-            value={reg.pin}
-            onChange={(e) => setReg({ ...reg, pin: e.target.value })}
-            placeholder="Запомни его — по нему ты зайдёшь снова"
+            value={reg.password}
+            onChange={(e) => {
+              setRegisterError('');
+              setReg({ ...reg, password: e.target.value });
+            }}
+            placeholder="Минимум 4 символа — нигде и никому не говори"
+            autoComplete="new-password"
           />
           <div className="field-block">
             <Check
@@ -936,7 +1138,8 @@ export default function App() {
               label="Даю согласие на обработку персональных данных"
             />
           </div>
-          <Btn full disabled={!regOk} onClick={registerAndEnter}>
+          {registerError ? <p className="profile-avatar-error">{registerError}</p> : null}
+          <Btn full disabled={!regOk} onClick={() => void registerAndEnter()}>
             Заходим в чат вместе
           </Btn>
         </div>
@@ -951,31 +1154,33 @@ export default function App() {
           ← к Лисичке
         </button>
         <h2 className="h2">С возвращением 💬</h2>
-        <p className="muted">То же имя и фамилия, что при регистрации, и твой код</p>
+        <p className="muted">Введи логин и пароль, с которыми регистрировался</p>
         <div className="card">
           <Field
-            label="Как тебя зовут?"
+            label="Логин"
             id="ln"
-            value={login.name}
+            value={login.login}
             onChange={(e) => {
               setLoginError('');
-              setLogin({ ...login, name: e.target.value });
+              setLogin({ ...login, login: e.target.value });
             }}
-            placeholder="Имя и фамилия, как при регистрации"
+            placeholder="Как в регистрации"
+            autoComplete="username"
           />
           <Field
-            label="Твой код"
+            label="Пароль"
             id="lc"
             type="password"
-            value={login.code}
+            value={login.password}
             onChange={(e) => {
               setLoginError('');
-              setLogin({ ...login, code: e.target.value });
+              setLogin({ ...login, password: e.target.value });
             }}
-            placeholder="Тот самый, что ты придумал"
+            placeholder="Пароль"
+            autoComplete="current-password"
           />
           {loginError ? <p className="profile-avatar-error">{loginError}</p> : null}
-          <Btn full onClick={loginAndEnter}>
+          <Btn full onClick={() => void loginAndEnter()}>
             Зайти в чат
           </Btn>
         </div>
@@ -1203,7 +1408,7 @@ export default function App() {
   }
 
   if (route === 'main' && role === 'student' && studentTab === 'history') {
-    const list = myCases.length ? myCases : cases.slice(0, 3);
+    const list = myCases;
     return (
       <Page narrow>
         <h2 className="h2 h2--mb-sm">Память нашего чата</h2>
@@ -1252,17 +1457,17 @@ export default function App() {
               {user?.avatarDataUrl ? (
                 <img src={user.avatarDataUrl} alt="" className="profile-avatar-img" draggable={false} />
               ) : (
-                <div className="profile-avatar-initials">{(user?.first?.[0] || 'Я') + (user?.last?.[0] || '')}</div>
+                <div className="profile-avatar-initials">{(user?.name?.[0] || 'Я') + (user?.surname?.[0] || '')}</div>
               )}
             </div>
             <div>
               <div className="profile-card__name">
-                {user?.first} {user?.last}
+                {user?.name} {user?.surname}
               </div>
               <div className="profile-card__class">
-                Класс: {user?.class?.trim() ? user.class : '—'}
+                Класс: {user?.className?.trim() ? user.className : '—'}
               </div>
-              <div className="profile-card__code">Код для входа: {user?.code}</div>
+              <div className="profile-card__code">Логин: {user?.login}</div>
             </div>
           </div>
           <div className="profile-avatar-actions">
@@ -1321,7 +1526,7 @@ export default function App() {
             ←
           </button>
           <div className="admin-title-row">
-            <h2>{adminCase.student}</h2>
+            <h2>{caseStudentLabel(adminCase.student)}</h2>
             {adminCase.urgent ? <Badge tone="danger">Срочно</Badge> : null}
           </div>
 
@@ -1382,24 +1587,42 @@ export default function App() {
           <h2 className="h2 h2--mb-sm">Чаты с Лисичкой</h2>
           <p className="muted muted--tight muted--flush">Кому сейчас хочется, чтобы кто-то услышал</p>
           <div className="list-stack list-stack--mt">
-            {cases.map((c) => {
+            {adminChats.length === 0 ? (
+              <p className="muted">Пока нет чатов — дождитесь, пока ученик начнёт разговор</p>
+            ) : (
+            adminChats.map((c) => {
               const last = c.messages[c.messages.length - 1];
               const preview = last?.from === 'user' ? last.text : c.messages.filter((m) => m.from === 'user').pop()?.text || '—';
               return (
-                <button key={c.id} type="button" onClick={() => setAdminCaseId(c.id)} className="history-card">
-                  <div className="history-card__top">
-                    <span className="history-card__time">{c.student}</span>
-                    <div className="history-card__badges">
-                      {c.urgent ? <Badge tone="danger">Срочно</Badge> : null}
-                      <Badge tone={c.status === 'closed' ? 'neutral' : c.status === 'new' ? 'wait' : 'primary'}>
-                        {statusBadgeAdmin(c.status)}
-                      </Badge>
+                <div key={c.id} className="history-card history-card--with-actions">
+                  <button
+                    type="button"
+                    className="history-card__open"
+                    onClick={() => setAdminCaseId(c.id)}
+                  >
+                    <div className="history-card__top">
+                      <span className="history-card__time">{caseStudentLabel(c.student)}</span>
+                      <div className="history-card__badges">
+                        {c.urgent ? <Badge tone="danger">Срочно</Badge> : null}
+                        <Badge tone={c.status === 'closed' ? 'neutral' : c.status === 'new' ? 'wait' : 'primary'}>
+                          {statusBadgeAdmin(c.status)}
+                        </Badge>
+                      </div>
                     </div>
-                  </div>
-                  <div className="history-card__preview">{preview}</div>
-                </button>
+                    <div className="history-card__preview">{preview}</div>
+                  </button>
+                  <GhostBtn
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteCaseById(c.id);
+                    }}
+                  >
+                    Удалить чат
+                  </GhostBtn>
+                </div>
               );
-            })}
+            })
+            )}
           </div>
         </div>
         <BottomNav
@@ -1423,8 +1646,76 @@ export default function App() {
       <Page narrow>
         <h2 className="h2 h2--mb-lg">Ты помогаешь Лисичке</h2>
         <p className="admin-staff-hint">
-          Здесь режим сотрудника. Чтобы вернуться к детскому экрану, выйди и зайди как ученик со своим кодом.
+          Здесь режим сотрудника. Чтобы вернуться к детскому экрану, выйди и зайди как ученик по логину и паролю.
         </p>
+        <h2 className="h2 h2--mb-sm admin-registry-section-title">Учётные записи</h2>
+        <div className="list-stack list-stack--mt">
+          {adminRegistryList.length === 0 ? (
+            <p className="muted">Пока нет зарегистрированных учеников</p>
+          ) : (
+            adminRegistryList.map((st) => {
+              const d = adminEditDraft[st.studentKey];
+              const rowSurname = d?.surname !== undefined ? d.surname : st.surname;
+              const rowName = d?.name !== undefined ? d.name : st.name;
+              const rowClass = d?.className !== undefined ? d.className : st.className;
+              return (
+                <div key={st.studentKey} className="card admin-registry-card">
+                  <Field
+                    label="Фамилия"
+                    id={`ad-sn-${st.studentKey}`}
+                    value={rowSurname}
+                    onChange={(e) => patchAdminDraft(st.studentKey, st, 'surname', e.target.value)}
+                    placeholder="Фамилия"
+                  />
+                  <Field
+                    label="Имя"
+                    id={`ad-nm-${st.studentKey}`}
+                    value={rowName}
+                    onChange={(e) => patchAdminDraft(st.studentKey, st, 'name', e.target.value)}
+                    placeholder="Имя"
+                  />
+                  <Field
+                    label="Класс"
+                    id={`ad-cl-${st.studentKey}`}
+                    value={rowClass}
+                    onChange={(e) => patchAdminDraft(st.studentKey, st, 'className', e.target.value)}
+                    placeholder="Класс"
+                  />
+                  <p className="muted admin-registry-line">Логин: {st.login} (нельзя изменить)</p>
+                  <p className="muted admin-registry-line admin-registry-line--date">
+                    Дата регистрации: {formatTime(st.createdAt || 0)}
+                  </p>
+                  <p className="muted admin-registry-line admin-registry-line--date">
+                    Последнее изменение:{' '}
+                    {st.adminProfileUpdatedAt
+                      ? formatTime(st.adminProfileUpdatedAt)
+                      : '— (ещё не меняли после регистрации)'}
+                  </p>
+                  <Btn full type="button" onClick={() => applyAdminProfileSave(st.studentKey)}>
+                    Сохранить ФИО и класс
+                  </Btn>
+                  <div className="admin-registry-hr" aria-hidden />
+                  <Field
+                    label="Новый пароль (сброс)"
+                    id={`ad-pw-${st.studentKey}`}
+                    type="password"
+                    value={adminResetPw[st.studentKey] || ''}
+                    onChange={(e) => {
+                      setAdminResetError('');
+                      setAdminResetPw((p) => ({ ...p, [st.studentKey]: e.target.value }));
+                    }}
+                    placeholder="не меньше 4 символов"
+                  />
+                  <Btn full type="button" onClick={() => void applyAdminPasswordReset(st.studentKey)}>
+                    Сбросить пароль
+                  </Btn>
+                </div>
+              );
+            })
+          )}
+        </div>
+        {adminProfileError ? <p className="profile-avatar-error admin-registry-error">{adminProfileError}</p> : null}
+        {adminResetError ? <p className="profile-avatar-error admin-registry-error">{adminResetError}</p> : null}
         <Btn
           variant="secondary"
           full
