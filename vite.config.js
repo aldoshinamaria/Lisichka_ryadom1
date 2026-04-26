@@ -16,6 +16,11 @@ export default defineConfig(({ command }) => ({
     },
   },
   plugins: [react()],
+  resolve: {
+    alias: {
+      '/App.jsx': path.join(projectRoot, 'App.jsx'),
+    },
+  },
   base: command === 'serve' ? '/' : './',
   build: {
     outDir: path.join(projectRoot, 'docs'),

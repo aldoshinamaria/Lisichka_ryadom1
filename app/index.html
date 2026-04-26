@@ -22,6 +22,15 @@
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="../src/main.jsx"></script>
+    <script type="module" src="/App.jsx"></script>
+    <script type="module">
+      import { createRoot } from 'react-dom/client';
+      import React, { StrictMode } from 'react';
+      import App from '/App.jsx';
+      const el = document.getElementById('root');
+      if (el) {
+        createRoot(el).render(React.createElement(StrictMode, null, React.createElement(App, null)));
+      }
+    </script>
   </body>
 </html>

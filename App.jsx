@@ -10,6 +10,7 @@ import './app.css';
 import foxChatPhoto from './лисичка аватар для чата.png';
 import meditatingFoxAnimation from './src/assets/Meditating Fox.json';
 import { notifyStaffStudentMessage } from './notifyEmail.js';
+import { checkMessage } from './api.js';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -496,6 +497,8 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatStatus, setChatStatus] = useState('idle');
   const [adultOpen, setAdultOpen] = useState(false);
+  /** Модалка «позвать взрослого» после checkMessage, иначе — по кнопке «Попросить помощи» */
+  const [adultFromDanger, setAdultFromDanger] = useState(false);
   const [adminReply, setAdminReply] = useState('');
   const [adminStatusPick, setAdminStatusPick] = useState('new');
 
@@ -514,6 +517,7 @@ export default function App() {
   const silenceNudgeTimerRef = useRef(null);
   const activeCaseIdRef = useRef(null);
   const silenceNudgeRotateRef = useRef(0);
+  const checkMessageDangerRef = useRef(false);
 
   activeCaseIdRef.current = activeCaseId;
 
@@ -782,6 +786,7 @@ export default function App() {
   const sendStudent = () => {
     const t = chatInput.trim();
     if (!t || !activeCaseId) return;
+    checkMessageDangerRef.current = false;
     foxReplyTimeoutsRef.current.forEach((id) => window.clearTimeout(id));
     foxReplyTimeoutsRef.current = [];
 
@@ -798,13 +803,29 @@ export default function App() {
     const lines = getFoxFollowUpLines(t);
     const foxText = lines[0] ?? 'Я рядом. Напиши ещё, если захочешь 💬';
     const caseId = activeCaseId;
+    const userMessage = t;
 
     const timeoutId = window.setTimeout(() => {
       appendMessage(caseId, { id: uid(), from: 'fox', at: Date.now(), text: foxText });
       setChatStatus('idle');
-      updateCase(caseId, { status: 'open' });
+      updateCase(caseId, { status: checkMessageDangerRef.current ? 'new' : 'open' });
     }, 1100);
     foxReplyTimeoutsRef.current.push(timeoutId);
+
+    const caseIdForCheck = caseId;
+    void (async () => {
+      try {
+        const result = await checkMessage(userMessage);
+        if (result?.danger) {
+          checkMessageDangerRef.current = true;
+          updateCase(caseIdForCheck, { urgent: true, status: 'new' });
+          setAdultFromDanger(true);
+          setAdultOpen(true);
+        }
+      } catch {
+        /* сеть / функция недоступна */
+      }
+    })();
   };
 
   const quickSay = (text) => {
@@ -820,6 +841,12 @@ export default function App() {
       at: Date.now(),
       text: 'Я передала, что тебе нужна поддержка рядом. Я никуда не ухожу — пиши, если снова станет тяжело 💬',
     });
+    setAdultFromDanger(false);
+    setAdultOpen(false);
+  };
+
+  const closeAdultModal = () => {
+    setAdultFromDanger(false);
     setAdultOpen(false);
   };
 
@@ -1113,16 +1140,27 @@ export default function App() {
               </button>
             </div>
 
-            <Btn variant="secondary" full onClick={() => setAdultOpen(true)}>
+            <Btn
+              variant="secondary"
+              full
+              onClick={() => {
+                setAdultFromDanger(false);
+                setAdultOpen(true);
+              }}
+            >
               Попросить помощи
             </Btn>
           </div>
         </div>
 
         {adultOpen ? (
-          <div role="dialog" aria-modal="true" className="modal-backdrop" onClick={() => setAdultOpen(false)}>
+          <div role="dialog" aria-modal="true" className="modal-backdrop" onClick={closeAdultModal}>
             <div className="modal-sheet" onClick={(e) => e.stopPropagation()}>
-              <div className="modal-sheet__title">Хочешь, я помогу позвать взрослого, который сможет помочь?</div>
+              <div className="modal-sheet__title">
+                {adultFromDanger
+                  ? 'Лисичка заметила, что тебе может быть тяжело. Хочешь, я позову взрослого?'
+                  : 'Хочешь, я помогу позвать взрослого, который сможет помочь?'}
+              </div>
               <p className="modal-sheet__text">
                 Я могу передать это, чтобы тебе помогли быстрее.
                 <br />
@@ -1130,7 +1168,7 @@ export default function App() {
                 Прочитают только те, кто может помочь.
               </p>
               <div className="modal-sheet__actions">
-                <Btn variant="secondary" full onClick={() => setAdultOpen(false)}>
+                <Btn variant="secondary" full onClick={closeAdultModal}>
                   Пока нет
                 </Btn>
                 <Btn full onClick={requestAdult}>
