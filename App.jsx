@@ -519,7 +519,7 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatStatus, setChatStatus] = useState('idle');
   const [adultOpen, setAdultOpen] = useState(false);
-  /** Модалка «позвать взрослого» после checkMessage, иначе — по кнопке «Попросить помощи» */
+  /** Модалка «позвать взрослого» после ответа API, иначе — по кнопке «Попросить помощи» */
   const [adultFromDanger, setAdultFromDanger] = useState(false);
   const [adminReply, setAdminReply] = useState('');
   const [adminStatusPick, setAdminStatusPick] = useState('new');
@@ -539,7 +539,7 @@ export default function App() {
   const silenceNudgeTimerRef = useRef(null);
   const activeCaseIdRef = useRef(null);
   const silenceNudgeRotateRef = useRef(0);
-  const checkMessageDangerRef = useRef(false);
+  const messageDangerFromApiRef = useRef(false);
 
   activeCaseIdRef.current = activeCaseId;
 
@@ -869,19 +869,13 @@ export default function App() {
     if (!messageText || !activeCaseId) return;
 
     console.log("sending message:", messageText);
-    let result;
-    try {
-      result = await checkMessage(messageText);
-    } catch (err) {
-      console.warn("checkMessage error:", err);
-      result = { danger: false };
-    }
+    const result = await checkMessage(messageText);
     console.log("checkMessage result:", result);
     if (result?.danger === true) {
       alert("Лисичка рядом. Я могу позвать взрослого");
     }
 
-    checkMessageDangerRef.current = !!result?.danger;
+    messageDangerFromApiRef.current = !!result?.danger;
     foxReplyTimeoutsRef.current.forEach((id) => window.clearTimeout(id));
     foxReplyTimeoutsRef.current = [];
 
@@ -901,11 +895,11 @@ export default function App() {
     const caseIdForCheck = caseId;
 
     const timeoutId = window.setTimeout(() => {
-      if (!checkMessageDangerRef.current) {
+      if (!messageDangerFromApiRef.current) {
         appendMessage(caseId, { id: uid(), from: 'fox', at: Date.now(), text: foxText });
       }
       setChatStatus('idle');
-      updateCase(caseId, { status: checkMessageDangerRef.current ? 'new' : 'open' });
+      updateCase(caseId, { status: messageDangerFromApiRef.current ? 'new' : 'open' });
     }, 1100);
     foxReplyTimeoutsRef.current.push(timeoutId);
 

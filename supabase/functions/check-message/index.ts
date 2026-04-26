@@ -37,47 +37,39 @@ serve(async (req) => {
       );
     }
 
-    const raw = typeof body?.message === "string" ? body.message : String(body?.message ?? "");
+    const message = body.message || "";
 
-    // ⚠️ тревожные слова (подстрока в тексте, без проверки при вводе — только в Edge Function)
-    const dangerSubstrings = [
+    console.log("SERVER BODY:", body);
+    console.log("SERVER MESSAGE:", message);
+
+    const lowerMessage = String(message).toLowerCase();
+
+    const dangerWords = [
+      "плохо",
+      "страшно",
       "грустно",
       "тревожно",
-      "плачу",
       "боюсь",
-      "страшно",
-      "меня бьют",
-      "обзывают",
-      "не хочу жить",
       "помогите",
-      "мне плохо",
-      "плохо", // осторожно: не срабатывать на «неплохо» — обработаем отдельно
-      "издеваются",
-      "одиноко",
+      "нужна помощь",
     ];
 
-    const lowerMessage = raw.toLowerCase();
+    const isDanger = dangerWords.some((word) => {
+      if (word === "плохо" && lowerMessage.includes("неплохо")) {
+        return false;
+      }
+      return lowerMessage.includes(word);
+    });
 
-    const isDanger =
-      dangerSubstrings.some((w) => {
-        if (w === "плохо") {
-          if (lowerMessage.includes("неплохо")) return false;
-          return lowerMessage.includes("плохо");
-        }
-        return lowerMessage.includes(w);
-      });
+    const payload = isDanger
+      ? { ok: true, danger: true, message: "⚠️ Обнаружен тревожный сигнал" }
+      : { ok: true, danger: false, message: "Сообщение безопасно" };
 
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        danger: isDanger,
-        message: isDanger
-          ? "⚠️ Обнаружен тревожный сигнал"
-          : "Сообщение безопасно",
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  } catch {
+    return new Response(JSON.stringify(payload), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    console.error("check-message error:", e);
     return new Response(
       JSON.stringify({ ok: false, danger: false, message: "Server error" }),
       {
