@@ -225,9 +225,13 @@ serve(async (req) => {
     const body = (await req.json()) as {
       message?: unknown;
       student_id?: unknown;
+      case_id?: unknown;
+      message_id?: unknown;
     };
     const message = String(body.message ?? "").trim();
     const student_id = body.student_id;
+    const case_id = typeof body.case_id === "string" ? body.case_id : null;
+    const message_id = typeof body.message_id === "string" ? body.message_id : null;
     if (!message) {
       return new Response(
         JSON.stringify({
@@ -298,8 +302,13 @@ serve(async (req) => {
 
       try {
         const { error: insErr } = await supabase.from("alerts").insert({
+          student_id: student_id || null,
+          case_id,
+          message_id,
           alert_type: alertType,
           status: "new",
+          summary_for_adult: summary || null,
+          source: "edge_ai_chat",
         });
         if (insErr) {
           console.error("alerts insert error:", insErr);

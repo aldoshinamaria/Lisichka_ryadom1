@@ -11,8 +11,13 @@ export async function insertAlert(row) {
     return { ok: false };
   }
   const { error } = await supabase.from('alerts').insert({
+    student_id: row.student_id ?? row.studentId ?? null,
+    case_id: row.case_id ?? row.caseId ?? null,
+    message_id: row.message_id ?? row.messageId ?? null,
     alert_type: row.alert_type,
     status: row.status ?? 'new',
+    summary_for_adult: row.summary_for_adult ?? row.summaryForAdult ?? null,
+    source: row.source ?? 'client',
   });
   if (error) {
     console.error('alerts insert failed', error);
@@ -26,7 +31,7 @@ export async function fetchAlerts() {
   if (!supabase) return [];
   const { data, error } = await supabase
     .from('alerts')
-    .select('*')
+    .select('*, students(id, login, surname, name, class_name)')
     .order('created_at', { ascending: false });
   if (error) {
     console.error('alerts fetch failed', error);

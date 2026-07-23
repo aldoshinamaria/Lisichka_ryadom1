@@ -162,12 +162,20 @@ serve(async (req) => {
   }
 
   try {
-    let body: { message?: unknown; student_id?: unknown; event_type?: unknown };
+    let body: {
+      message?: unknown;
+      student_id?: unknown;
+      event_type?: unknown;
+      case_id?: unknown;
+      message_id?: unknown;
+    };
     try {
       body = (await req.json()) as {
         message?: unknown;
         student_id?: unknown;
         event_type?: unknown;
+        case_id?: unknown;
+        message_id?: unknown;
       };
     } catch {
       return new Response(
@@ -181,6 +189,8 @@ serve(async (req) => {
 
     const message = body.message || "";
     const student_id = body.student_id;
+    const case_id = typeof body.case_id === "string" ? body.case_id : null;
+    const message_id = typeof body.message_id === "string" ? body.message_id : null;
     const eventType =
       typeof body.event_type === "string" ? body.event_type : undefined;
 
@@ -188,8 +198,21 @@ serve(async (req) => {
     console.log("SERVER MESSAGE:", String(message));
 
     if (eventType === "child_pressed_help") {
+      let alertSaved = false;
       try {
         const student = await fetchStudentById(student_id);
+        const supabase = getSupabaseForStudents();
+        if (supabase) {
+          const { error: alertError } = await supabase.from("alerts").insert({
+            student_id: student_id || null,
+            case_id,
+            message_id,
+            alert_type: "child_pressed_help",
+            status: "new",
+            source: "edge_check_message",
+          });
+          alertSaved = !alertError;
+        }
         const lead = student
           ? (() => {
               const studentName = `${student.surname} ${student.name}`.replace(
@@ -216,7 +239,7 @@ ${adminStudentUrl}`;
         console.error("web3forms email error:", e);
       }
       return new Response(
-        JSON.stringify({ ok: true, danger: false, reply: "" }),
+        JSON.stringify({ ok: true, danger: false, reply: "", alert_saved: alertSaved }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -245,9 +268,23 @@ ${adminStudentUrl}`;
       return lowerMessage.includes(word);
     });
 
+    let dangerAlertSaved = false;
     if (isDanger) {
       try {
         const student = await fetchStudentById(student_id);
+        const supabase = getSupabaseForStudents();
+        if (supabase) {
+          const { error: alertError } = await supabase.from("alerts").insert({
+            student_id: student_id || null,
+            case_id,
+            message_id,
+            alert_type: "ai_detected",
+            status: "new",
+            summary_for_adult: strMessage.slice(0, 500),
+            source: "edge_check_message",
+          });
+          dangerAlertSaved = !alertError;
+        }
         const textMsg = strMessage;
         const lead = student
           ? (() => {
@@ -279,6 +316,7 @@ ${adminStudentUrl}`;
       ok: true,
       reply: aiReply,
       danger: isDanger,
+      alert_saved: isDanger ? dangerAlertSaved : false,
     };
 
     return new Response(JSON.stringify(payload), {

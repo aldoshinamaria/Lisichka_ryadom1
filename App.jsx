@@ -13,14 +13,24 @@ import { checkMessage } from "./api";
 import { insertStudentAndGetId, findStudentIdByLogin } from './studentsDb.js';
 import { hashPassword, verifyPassword } from './auth.js';
 import { deleteAlertById, fetchAlerts, insertAlert, patchAlertStatus } from './alerts.js';
+import {
+  deleteMessagesByCaseId,
+  fetchStudentsForStaff,
+  hasSupabase,
+  persistMessage,
+  registerStudentAccount,
+  serverStudentToLocal,
+  signInStaffAccount,
+  signInStudentAccount,
+  signOutAccount,
+  syncStaffCasesFromServer,
+  syncStudentCasesFromServer,
+  updateStudentProfileOnServer,
+} from './serverStore.js';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
-
-/** Демо-учётные сотрудника; в проде заменить проверкой на сервере */
-const STAFF_LOGIN = 'Алдошина';
-const STAFF_PASSWORD = 'помощь';
 
 function avatarStorageKey(studentKey) {
   return `lisichka_avatar_${encodeURIComponent(studentKey)}`;
@@ -119,6 +129,16 @@ function setLocalStudentId(id) {
     localStorage.setItem('student_id', String(id));
   } catch {
     /* квота / приватный режим */
+  }
+}
+
+function getLocalStudentId() {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const id = localStorage.getItem('student_id');
+    return id && id !== '1' ? id : null;
+  } catch {
+    return null;
   }
 }
 
@@ -615,6 +635,32 @@ export default function App() {
     }
   }, [cases]);
 
+  /** Подставить кейсы ученика с сервера, остальные (чужие) оставить в кэше. */
+  const applyStudentServerCases = useCallback((studentKey, serverCases) => {
+    const key = normLogin(studentKey);
+    setCases((prev) => {
+      const others = prev.filter(
+        (c) => c.student !== key && !String(c.id || '').startsWith('c-seed')
+      );
+      return [...serverCases, ...others].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    });
+  }, []);
+
+  const syncStudentCases = useCallback(
+    async (studentKey, studentId, localSnapshot) => {
+      if (!studentKey) return [];
+      const snap = localSnapshot || loadCases();
+      const result = await syncStudentCasesFromServer({
+        studentId,
+        studentKey,
+        localCases: snap,
+      });
+      applyStudentServerCases(studentKey, result.cases);
+      return result.cases;
+    },
+    [applyStudentServerCases]
+  );
+
   useEffect(() => {
     if (route === 'main' && role === 'student' && user?.studentKey) {
       saveSession({
@@ -643,23 +689,34 @@ export default function App() {
     setActiveCaseId(mine[0]?.id ?? null);
   }, [route, role, user, activeCaseId, cases]);
 
-  /** Подтянуть students.id в localStorage, если в реестре ещё нет dbStudentId (старые аккаунты). */
+  /** Подтянуть students.id и синхронизировать кейсы с сервером (сервер = источник правды). */
   useEffect(() => {
     if (route !== 'main' || role !== 'student' || !user?.studentKey) return;
-    const reg = loadRegistry().find((r) => r.studentKey === user.studentKey);
-    if (!reg || reg.dbStudentId) return;
-    if (!reg.login) return;
     let cancelled = false;
     (async () => {
-      const id = await findStudentIdByLogin(reg.login);
-      if (cancelled || !id) return;
-      setLocalStudentId(id);
-      setRegistryDbStudentId(user.studentKey, id);
+      const reg = loadRegistry().find((r) => r.studentKey === user.studentKey);
+      let studentId = reg?.dbStudentId || getLocalStudentId();
+      if (!studentId && reg?.login) {
+        studentId = await findStudentIdByLogin(reg.login);
+        if (studentId) {
+          setLocalStudentId(studentId);
+          setRegistryDbStudentId(user.studentKey, studentId);
+        }
+      }
+      if (cancelled || !hasSupabase()) return;
+      const synced = await syncStudentCases(user.studentKey, studentId, loadCases());
+      if (cancelled) return;
+      if (synced.length) {
+        setActiveCaseId((prev) => {
+          if (prev && synced.some((c) => c.id === prev)) return prev;
+          return synced[0]?.id ?? null;
+        });
+      }
     })();
     return () => {
       cancelled = true;
     };
-  }, [route, role, user?.studentKey]);
+  }, [route, role, user?.studentKey, syncStudentCases]);
 
   const clearSilenceNudgeTimer = useCallback(() => {
     if (silenceNudgeTimerRef.current) {
@@ -694,29 +751,41 @@ export default function App() {
     silenceNudgeTimerRef.current = window.setTimeout(() => {
       silenceNudgeTimerRef.current = null;
       const caseId = activeCaseIdRef.current;
+      const i = silenceNudgeRotateRef.current;
+      silenceNudgeRotateRef.current = i + 1;
+      const nudgeText = pickSilenceNudgeLine(i);
+      const nudgeMsg = {
+        id: uid(),
+        from: 'fox',
+        at: Date.now(),
+        text: nudgeText,
+        silenceCheck: true,
+      };
 
       setCases((prev) => {
         const c = prev.find((x) => x.id === caseId);
         if (!c) return prev;
         const l = c.messages[c.messages.length - 1];
         if (l.from === 'user' || l.id !== foxId || l.silenceCheck) return prev;
-        const i = silenceNudgeRotateRef.current;
-        silenceNudgeRotateRef.current = i + 1;
-        const nudgeText = pickSilenceNudgeLine(i);
+        const regRecord = loadRegistry().find((r) => r.studentKey === c.student);
+        const studentId = regRecord?.dbStudentId || getLocalStudentId();
+        if (studentId) {
+          void persistMessage({
+            id: nudgeMsg.id,
+            caseId: c.id,
+            studentId,
+            authorRole: 'fox',
+            body: nudgeMsg.text,
+            caseStatus: c.status,
+            urgent: c.urgent,
+            createdAt: nudgeMsg.at,
+          });
+        }
         return prev.map((caseItem) =>
           caseItem.id === caseId
             ? {
                 ...caseItem,
-                messages: [
-                  ...caseItem.messages,
-                  {
-                    id: uid(),
-                    from: 'fox',
-                    at: Date.now(),
-                    text: nudgeText,
-                    silenceCheck: true,
-                  },
-                ],
+                messages: [...caseItem.messages, nudgeMsg],
                 updatedAt: Date.now(),
               }
             : caseItem
@@ -774,7 +843,27 @@ export default function App() {
 
   const refreshAdminAlerts = useCallback(async () => {
     if (role !== 'admin' || route !== 'main') return;
-    const rows = await fetchAlerts();
+    const [rows, serverStudents] = await Promise.all([fetchAlerts(), fetchStudentsForStaff()]);
+    serverStudents.map(serverStudentToLocal).filter(Boolean).forEach((student) => {
+      upsertRegistryRecord({ ...student, passwordHash: 'server-auth' });
+    });
+    if (serverStudents.length) setAdminRegistryTick((t) => t + 1);
+
+    const idByKey = new Map();
+    loadRegistry().forEach((r) => {
+      if (r?.studentKey && r.dbStudentId) idByKey.set(r.studentKey, r.dbStudentId);
+    });
+    serverStudents.forEach((s) => {
+      const key = String(s.login || '').trim().toLowerCase();
+      if (key && s.id) idByKey.set(key, s.id);
+    });
+
+    const sync = await syncStaffCasesFromServer(loadCases(), (studentKey) =>
+      idByKey.get(normLogin(studentKey))
+    );
+    if (sync.cases) {
+      setCases(sync.cases);
+    }
     setAdminAlertsFromDb(rows);
   }, [role, route]);
 
@@ -849,13 +938,39 @@ export default function App() {
     };
 
     const now = Date.now();
-    const dbId = await insertStudentAndGetId({
+    const authResult = await registerStudentAccount({
       surname,
       name,
       className,
       login: loginStr,
       password: pass,
     });
+    if (!authResult.ok && authResult.reason !== 'supabase_missing') {
+      setRegisterError('Не удалось создать учётную запись. Проверь Supabase Auth или попробуй другой логин.');
+      return;
+    }
+    const dbId =
+      authResult.student?.id ||
+      (await insertStudentAndGetId({
+        surname,
+        name,
+        className,
+        login: loginStr,
+        authUserId: authResult.user?.id,
+      }));
+    if (dbId) setLocalStudentId(dbId);
+    if (dbId) {
+      void persistMessage({
+        id: nc.messages[0].id,
+        caseId: nc.id,
+        studentId: dbId,
+        authorRole: 'fox',
+        body: nc.messages[0].text,
+        caseStatus: nc.status,
+        urgent: nc.urgent,
+        createdAt: nc.messages[0].at,
+      });
+    }
     upsertRegistryRecord({
       studentKey,
       name,
@@ -868,7 +983,7 @@ export default function App() {
     });
     setAdminRegistryTick((t) => t + 1);
     setCases((prev) => {
-      const rest = prev.filter((c) => !String(c.id || '').startsWith('c-seed'));
+      const rest = prev.filter((c) => !String(c.id || '').startsWith('c-seed') && c.student !== studentKey);
       return [nc, ...rest];
     });
     setUser({
@@ -897,6 +1012,60 @@ export default function App() {
       setLoginError('Введи логин и пароль');
       return;
     }
+    const serverLogin = await signInStudentAccount(l, pass);
+    if (serverLogin.ok && serverLogin.student) {
+      const serverStudent = serverStudentToLocal(serverLogin.student);
+      if (serverStudent?.dbStudentId) setLocalStudentId(serverStudent.dbStudentId);
+      if (serverStudent) {
+        upsertRegistryRecord({ ...serverStudent, passwordHash: 'server-auth' });
+        setAdminRegistryTick((t) => t + 1);
+      }
+      const studentKey = serverStudent?.studentKey || l;
+      setUser({
+        name: serverStudent?.name || '',
+        surname: serverStudent?.surname || '',
+        className: serverStudent?.className || '',
+        login: serverStudent?.login || login.login,
+        studentKey,
+        avatarDataUrl: readStoredAvatar(studentKey),
+      });
+      const studentId = serverStudent?.dbStudentId || null;
+      let synced = await syncStudentCases(studentKey, studentId, loadCases());
+      let nextActiveId = synced[0]?.id ?? null;
+      if (!synced.length) {
+        const newId = uid();
+        const nc = {
+          id: newId,
+          student: studentKey,
+          status: 'open',
+          urgent: false,
+          updatedAt: Date.now(),
+          messages: [initialFox()],
+        };
+        setCases((prev) => [nc, ...prev.filter((c) => c.student !== studentKey)]);
+        if (studentId) {
+          void persistMessage({
+            id: nc.messages[0].id,
+            caseId: nc.id,
+            studentId,
+            authorRole: 'fox',
+            body: nc.messages[0].text,
+            caseStatus: nc.status,
+            urgent: nc.urgent,
+            createdAt: nc.messages[0].at,
+          });
+        }
+        nextActiveId = newId;
+      }
+      setActiveCaseId(nextActiveId);
+      setRoute('main');
+      setRole('student');
+      setStudentTab('chat');
+      setHistoryCaseId(null);
+      setAdminCaseId(null);
+      setChatStatus('idle');
+      return;
+    }
     const found = loadRegistry().find((r) => r.studentKey === l);
     if (!found) {
       setLoginError('Неверный логин или пароль');
@@ -914,11 +1083,13 @@ export default function App() {
     }
 
     const studentKey = found.studentKey;
-    if (found.dbStudentId) {
-      setLocalStudentId(found.dbStudentId);
+    let studentId = found.dbStudentId || null;
+    if (studentId) {
+      setLocalStudentId(studentId);
     } else {
       const id = await findStudentIdByLogin(found.login);
       if (id) {
+        studentId = id;
         setLocalStudentId(id);
         setRegistryDbStudentId(studentKey, id);
       }
@@ -931,9 +1102,9 @@ export default function App() {
       studentKey,
       avatarDataUrl: readStoredAvatar(studentKey),
     });
-    const mine = cases.filter((c) => c.student === studentKey).sort((a, b) => b.updatedAt - a.updatedAt);
-    let nextActiveId = mine[0]?.id ?? null;
-    if (!mine.length) {
+    let synced = await syncStudentCases(studentKey, studentId, loadCases());
+    let nextActiveId = synced[0]?.id ?? null;
+    if (!synced.length) {
       const newId = uid();
       const nc = {
         id: newId,
@@ -943,7 +1114,19 @@ export default function App() {
         updatedAt: Date.now(),
         messages: [initialFox()],
       };
-      setCases((prev) => [nc, ...prev]);
+      setCases((prev) => [nc, ...prev.filter((c) => c.student !== studentKey)]);
+      if (studentId) {
+        void persistMessage({
+          id: nc.messages[0].id,
+          caseId: nc.id,
+          studentId,
+          authorRole: 'fox',
+          body: nc.messages[0].text,
+          caseStatus: nc.status,
+          urgent: nc.urgent,
+          createdAt: nc.messages[0].at,
+        });
+      }
       nextActiveId = newId;
     }
     setActiveCaseId(nextActiveId);
@@ -953,20 +1136,48 @@ export default function App() {
     setHistoryCaseId(null);
     setAdminCaseId(null);
     setChatStatus('idle');
-  }, [login, cases]);
+  }, [login, syncStudentCases]);
+
+  const persistCaseMessage = useCallback((caseItem, msg, patch = {}) => {
+    if (!caseItem || !msg) return;
+    const regRecord = loadRegistry().find((r) => r.studentKey === caseItem.student);
+    const studentId = regRecord?.dbStudentId || getLocalStudentId();
+    void persistMessage({
+      id: msg.id,
+      caseId: caseItem.id,
+      studentId,
+      authorRole: msg.from === 'user' ? 'student' : msg.from,
+      body: msg.text,
+      caseStatus: patch.status || caseItem.status,
+      urgent: patch.urgent ?? caseItem.urgent,
+      createdAt: msg.at,
+    });
+  }, []);
 
   const appendMessage = useCallback((caseId, msg) => {
     setCases((prev) =>
-      prev.map((c) => (c.id === caseId ? { ...c, messages: [...c.messages, msg], updatedAt: Date.now() } : c))
+      prev.map((c) => {
+        if (c.id !== caseId) return c;
+        const next = { ...c, messages: [...c.messages, msg], updatedAt: Date.now() };
+        persistCaseMessage(next, msg);
+        return next;
+      })
     );
-  }, []);
+  }, [persistCaseMessage]);
 
   const updateCase = useCallback((caseId, patch) => {
-    setCases((prev) => prev.map((c) => (c.id === caseId ? { ...c, ...patch, updatedAt: Date.now() } : c)));
-  }, []);
+    setCases((prev) => prev.map((c) => {
+      if (c.id !== caseId) return c;
+      const next = { ...c, ...patch, updatedAt: Date.now() };
+      const last = next.messages[next.messages.length - 1];
+      if (last) persistCaseMessage(next, last, patch);
+      return next;
+    }));
+  }, [persistCaseMessage]);
 
   const deleteCaseById = useCallback((caseId) => {
     if (!window.confirm('Удалить этот чат? Действие нельзя отменить.')) return;
+    void deleteMessagesByCaseId(caseId);
     setCases((prev) => prev.filter((c) => c.id !== caseId));
     setAdminCaseId((prev) => (prev === caseId ? null : prev));
     setHistoryCaseId((prev) => (prev === caseId ? null : prev));
@@ -1008,13 +1219,14 @@ export default function App() {
   }, []);
 
   const sendStudent = async () => {
-    console.log("SEND CLICKED");
     const messageText = chatInput.trim();
     if (!messageText || !activeCaseId) return;
+    const userMessageId = uid();
 
-    console.log("sending message:", messageText);
-    const result = await checkMessage(messageText);
-    console.log("checkMessage result:", result);
+    const result = await checkMessage(messageText, {
+      case_id: activeCaseId,
+      message_id: userMessageId,
+    });
     if (result?.danger === true) {
       alert("Лисичка рядом. Я могу позвать взрослого");
     }
@@ -1029,8 +1241,18 @@ export default function App() {
     foxReplyTimeoutsRef.current = [];
 
     setChatInput('');
-    const userMessageId = uid();
     appendMessage(activeCaseId, { id: userMessageId, from: 'user', at: Date.now(), text: messageText });
+    if (result?.danger && result?.alert_saved !== true) {
+      void insertAlert({
+        student_id: getLocalStudentId(),
+        case_id: activeCaseId,
+        message_id: userMessageId,
+        alert_type: result.alert_type || 'ai_detected',
+        status: 'new',
+        summary_for_adult: result.summary_for_adult || null,
+        source: 'client_check_message',
+      });
+    }
     notifyStaffStudentMessage({
       studentKey: user?.studentKey,
       text: messageText,
@@ -1058,13 +1280,18 @@ export default function App() {
     setChatInput(text);
   };
 
-  const requestAdult = () => {
+  const requestAdult = async () => {
     if (!activeCaseId) return;
-    void checkMessage("", { event_type: "child_pressed_help" });
-    void insertAlert({
-      alert_type: 'child_pressed_help',
-      status: 'new',
-    });
+    const result = await checkMessage("", { event_type: "child_pressed_help", case_id: activeCaseId });
+    if (result?.alert_saved !== true) {
+      void insertAlert({
+        student_id: getLocalStudentId(),
+        case_id: activeCaseId,
+        alert_type: 'child_pressed_help',
+        status: 'new',
+        source: 'child_pressed_help',
+      });
+    }
     updateCase(activeCaseId, { urgent: true, status: 'new' });
     appendMessage(activeCaseId, {
       id: uid(),
@@ -1089,19 +1316,20 @@ export default function App() {
     setAdminReply('');
   };
 
-  const submitAdminStaffLogin = () => {
+  const submitAdminStaffLogin = async () => {
     const l = adminStaff.login.trim();
     const p = adminStaff.password;
-    if (l === STAFF_LOGIN && p === STAFF_PASSWORD) {
+    const result = await signInStaffAccount(l, p);
+    if (result.ok) {
       setAdminStaffError('');
       setAdminStaff({ login: '', password: '' });
-      setRole('admin');
+      setRole(result.profile?.role === 'admin' ? 'admin' : 'admin');
       setRoute('main');
       setAdminTab('queue');
       setAdminCaseId(null);
       setAdminReply('');
     } else {
-      setAdminStaffError('Неверный логин или пароль');
+      setAdminStaffError('Неверный логин или пароль сотрудника');
     }
   };
 
@@ -1126,7 +1354,7 @@ export default function App() {
   );
 
   const applyAdminProfileSave = useCallback(
-    (studentKey) => {
+    async (studentKey) => {
       setAdminProfileError('');
       const st = loadRegistry().find((x) => x.studentKey === studentKey);
       if (!st) {
@@ -1143,6 +1371,12 @@ export default function App() {
         return;
       }
       updateStudentProfileFields(studentKey, { surname, name, className });
+      if (st.dbStudentId) {
+        const result = await updateStudentProfileOnServer(st.dbStudentId, { surname, name, className });
+        if (!result.ok) {
+          setAdminProfileError('Локально сохранено, но Supabase не принял изменение профиля');
+        }
+      }
       setAdminEditDraft((p) => {
         const n = { ...p };
         delete n[studentKey];
@@ -1956,6 +2190,7 @@ export default function App() {
           variant="secondary"
           full
           onClick={() => {
+            void signOutAccount();
             setRoute('welcome');
             setRole('student');
             setAdminTab('queue');

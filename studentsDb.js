@@ -7,10 +7,12 @@ import { supabase } from './supabaseClient.js';
  */
 export async function insertStudentAndGetId(p) {
   if (!supabase) return null;
-  const { surname, name, className, login, password } = p;
+  const { surname, name, className, login, authUserId } = p;
   const { data: student, error } = await supabase
     .from('students')
-    .insert([{ surname, name, class_name: className, login, password_hash: password }])
+    .upsert([{ surname, name, class_name: className, login, auth_user_id: authUserId || null }], {
+      onConflict: 'login',
+    })
     .select()
     .single();
   if (error) {
